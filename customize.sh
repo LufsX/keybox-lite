@@ -12,15 +12,17 @@ else
     ui_print "- Root manager: Magisk $MAGISK_VER"
 fi
 
-set_perm "$MODPATH/action.sh" 0 0 0755
-set_perm "$MODPATH/settings.sh" 0 0 0755
-set_perm "$MODPATH/service.sh" 0 0 0755
-set_perm "$MODPATH/uninstall.sh" 0 0 0755
-set_perm "$MODPATH/bin/keyboxlite" 0 0 0755
+for kbl_file in action.sh settings.sh service.sh uninstall.sh sources.sh bin/keyboxlite; do
+    [ -f "$MODPATH/$kbl_file" ] || abort "! Missing $kbl_file"
+done
+for kbl_file in action.sh settings.sh service.sh uninstall.sh bin/keyboxlite; do
+    set_perm "$MODPATH/$kbl_file" 0 0 0755 || abort "! Cannot set permissions: $kbl_file"
+done
+# uninstall leaves this marker to block late writers; reinstall enables runtime.
+rm -f /data/adb/keybox-lite/stopping || abort "! Cannot enable Keybox Lite"
 
-if [ -x /data/adb/modules/duck-toolbox/bin/duckctl.sh ]; then
-    ui_print "- Duck ToolBox found; installs go through duckctl (validated + backed up)"
-fi
+ui_print "- Standalone backend detection, validation and backed-up installation"
+ui_print "- Supports Tricky Store, OhMyKeymint and TEESimulator"
 
 ui_print "- Use the module Action button to install a keybox."
 ui_print " "

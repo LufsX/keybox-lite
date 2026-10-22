@@ -5,15 +5,18 @@
 package keybox
 
 import (
-	"encoding/base64"
+	"bytes"
 	"encoding/pem"
+	"encoding/xml"
+	"fmt"
+	"io"
 	"strings"
 )
 
-// StructureValid is a cheap check that the payload looks like a keybox document.
+// StructureValid checks for a complete XML document with an AndroidAttestation root.
 func StructureValid(b []byte) bool {
-	s := string(b)
-	return strings.Contains(s, "<AndroidAttestation") && strings.Contains(s, "</AndroidAttestation>")
+	_, err := parse(b, false, nil)
+	return err == nil
 }
 
 // normalize trims whitespace on every line so PEM headers start a line (keybox XML
@@ -26,82 +29,147 @@ func normalize(b []byte) []byte {
 	return []byte(strings.Join(lines, "\n"))
 }
 
-// Serials returns the decimal serial numbers of every certificate in the keybox.
-func Serials(keybox []byte) []string {
-	var out []string
-	rest := normalize(keybox)
+// Serials returns decimal serial numbers, or an empty slice if parsing fails.
+func Serials(data []byte) []string {
+	serials, err := ParseSerials(data)
+	if err != nil {
+		return []string{}
+	}
+	return serials
+}
+
+// ParseSerials extracts every Certificate element and fails if any cannot be read.
+// A partial set must never be used to declare a keybox free of revocations.
+func ParseSerials(data []byte) ([]string, error) {
+	return parse(data, true, nil)
+}
+
+func parse(data []byte, certificates bool, inspect func([]byte) error) ([]string, error) {
+	out := []string{}
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	depth, roots := 0, 0
 	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
+		token, err := decoder.Token()
+		if err == io.EOF {
+			if roots != 1 || depth != 0 {
+				return nil, fmt.Errorf("incomplete keybox XML")
+			}
+			return out, nil
 		}
-		if block.Type != "CERTIFICATE" {
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("keybox XML: %w", err)
 		}
-		if serial, ok := serialOf(block.Bytes); ok {
-			out = append(out, bytesToDecimal(serial))
+		switch token := token.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				roots++
+				if roots != 1 || token.Name.Local != "AndroidAttestation" {
+					return nil, fmt.Errorf("expected AndroidAttestation root")
+				}
+			}
+			if certificates && token.Name.Local == "Certificate" {
+				var certificate struct {
+					Text     string     `xml:",chardata"`
+					Children []struct{} `xml:",any"`
+				}
+				if err := decoder.DecodeElement(&certificate, &token); err != nil {
+					return nil, fmt.Errorf("certificate XML: %w", err)
+				}
+				text := bytes.TrimSpace(normalize([]byte(certificate.Text)))
+				block, rest := pem.Decode(text)
+				if len(certificate.Children) != 0 || !bytes.HasPrefix(text, []byte("-----BEGIN CERTIFICATE-----\n")) ||
+					block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
+					return nil, fmt.Errorf("invalid certificate PEM")
+				}
+				serial, ok := serialOf(block.Bytes)
+				if !ok {
+					return nil, fmt.Errorf("invalid certificate DER")
+				}
+				if inspect != nil {
+					if err := inspect(block.Bytes); err != nil {
+						return nil, err
+					}
+				}
+				out = append(out, bytesToDecimal(serial))
+				continue // DecodeElement consumed the closing tag too.
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		case xml.CharData:
+			if depth == 0 && len(bytes.TrimSpace(token)) != 0 {
+				return nil, fmt.Errorf("text outside keybox root")
+			}
 		}
 	}
-	return out
 }
 
 // ---------------------------------------------------------------- DER
 
-// tlv reads one DER element at p, returning its tag and value slice.
-func tlv(b []byte, p int) (tag byte, val []byte, ok bool) {
-	if p+2 > len(b) {
-		return 0, nil, false
+// tlv reads one DER element at p, including the offset of the next element.
+func tlv(b []byte, p int) (tag byte, val []byte, next int, ok bool) {
+	if p < 0 || p >= len(b)-1 {
+		return 0, nil, 0, false
 	}
 	tag = b[p]
 	p++
-	n := int(b[p])
+	n := uint64(b[p])
 	p++
 	if n&0x80 != 0 {
-		count := n & 0x7f
-		if count == 0 || count > 4 || p+count > len(b) {
-			return 0, nil, false
+		count := int(n & 0x7f)
+		if count == 0 || count > 4 || count > len(b)-p || b[p] == 0 {
+			return 0, nil, 0, false
 		}
 		n = 0
 		for i := 0; i < count; i++ {
-			n = n<<8 | int(b[p])
+			n = n<<8 | uint64(b[p])
 			p++
 		}
+		if n < 128 {
+			return 0, nil, 0, false
+		}
 	}
-	if p+n > len(b) {
-		return 0, nil, false
+	if n > uint64(len(b)-p) {
+		return 0, nil, 0, false
 	}
-	return tag, b[p : p+n], true
+	next = p + int(n)
+	return tag, b[p:next], next, true
 }
 
 // serialOf walks Certificate -> tbsCertificate -> serialNumber.
 func serialOf(der []byte) ([]byte, bool) {
 	// Certificate SEQUENCE
-	tag, body, ok := tlv(der, 0)
-	if !ok || tag != 0x30 {
+	tag, body, next, ok := tlv(der, 0)
+	if !ok || tag != 0x30 || next != len(der) {
 		return nil, false
 	}
 	// tbsCertificate SEQUENCE
-	tag, tbs, ok := tlv(body, 0)
+	tag, tbs, _, ok := tlv(body, 0)
 	if !ok || tag != 0x30 {
 		return nil, false
 	}
 	// first field: [0] version (optional), then serialNumber INTEGER
-	tag, val, ok := tlv(tbs, 0)
+	tag, val, next, ok := tlv(tbs, 0)
 	if !ok {
 		return nil, false
 	}
-	if tag == 0xa0 { // version wrapper: skip it, read next element
-		off := 2 + len(val) // tag + len byte + value (short form is enough here)
-		tag, val, ok = tlv(tbs, off)
+	if tag == 0xa0 { // explicit version wrapper
+		versionTag, version, end, valid := tlv(val, 0)
+		if !valid || versionTag != 0x02 || end != len(val) || len(version) != 1 || version[0] > 2 {
+			return nil, false
+		}
+		tag, val, _, ok = tlv(tbs, next)
 		if !ok {
 			return nil, false
 		}
 	}
-	if tag != 0x02 {
+	if tag != 0x02 || len(val) == 0 || val[0]&0x80 != 0 {
 		return nil, false
 	}
-	for len(val) > 1 && val[0] == 0 {
+	if len(val) > 1 && val[0] == 0 {
+		if val[1]&0x80 == 0 {
+			return nil, false
+		}
 		val = val[1:]
 	}
 	return val, true
@@ -127,6 +195,3 @@ func bytesToDecimal(b []byte) string {
 	}
 	return string(out)
 }
-
-// b64isUnused keeps base64 imported for future providers; referenced to avoid removal.
-var _ = base64.StdEncoding

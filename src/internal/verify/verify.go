@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"keyboxlite/internal/info"
 	"keyboxlite/internal/keybox"
@@ -45,21 +47,21 @@ func busybox() string {
 func fetch(url, out string) error {
 	os.Remove(out)
 	if curl, err := exec.LookPath("curl"); err == nil {
-		cmd := exec.Command(curl, "-fsSL", "--connect-timeout", "20", "--max-time", "180",
+		cmd := exec.Command(curl, "-fsSL", "--connect-timeout", "8", "--max-time", "60", "--speed-time", "15", "--speed-limit", "128",
 			"-H", "Accept-Encoding: identity", "-o", out, url)
 		if cmd.Run() == nil {
 			return nil
 		}
 	}
 	if bb := busybox(); bb != "" {
-		cmd := exec.Command(bb, "wget", "-q", "-T", "60", "-t", "1",
+		cmd := exec.Command(bb, "wget", "-q", "-T", "20",
 			"--header", "Accept-Encoding: identity", "-O", out, url)
 		if cmd.Run() == nil {
 			return nil
 		}
 	}
 	if wget, err := exec.LookPath("wget"); err == nil {
-		cmd := exec.Command(wget, "-q", "--timeout=60", "--tries=1", "-O", out, url)
+		cmd := exec.Command(wget, "-q", "-T", "20", "-O", out, url)
 		if cmd.Run() == nil {
 			return nil
 		}
@@ -69,7 +71,11 @@ func fetch(url, out string) error {
 
 func looksLikeStatus(path string) bool {
 	b, err := os.ReadFile(path)
-	return err == nil && len(b) > 0 && strings.Contains(string(b), "entries")
+	if err != nil {
+		return false
+	}
+	_, err = status.Check(b, nil)
+	return err == nil
 }
 
 func candidates(accel string) []string {
@@ -85,7 +91,8 @@ func candidates(accel string) []string {
 	return urls
 }
 
-// Run: 0 = not revoked, 1 = revoked/suspended, 2 = could not check.
+// Run: 0 = time-valid and not revoked, 1 = revoked/suspended,
+// 2 = could not check, 3 = expired or not yet valid.
 func Run(args []string) int {
 	accel := os.Getenv("KB_ACCEL")
 	if accel == "" {
@@ -108,13 +115,33 @@ func Run(args []string) int {
 		fmt.Println("not a keybox (missing AndroidAttestation)")
 		return 2
 	}
-	serials := keybox.Serials(data)
-	if len(serials) == 0 {
+	serials, err := keybox.ParseSerials(data)
+	if err != nil || len(serials) == 0 {
 		fmt.Println("could not parse certificate serials")
 		return 2
 	}
 
-	out := tmpDir() + "/keybox-verify.json"
+	validity, err := keybox.CheckValidity(data, time.Now())
+	if err != nil {
+		fmt.Printf("could not parse certificate validity: %v\n", err)
+		return 2
+	}
+	for _, cert := range validity.Certificates {
+		fmt.Printf("validity: serial %s -> %s (%s to %s)\n", cert.Serial, cert.Status,
+			time.Unix(cert.NotBefore, 0).UTC().Format(time.RFC3339), time.Unix(cert.NotAfter, 0).UTC().Format(time.RFC3339))
+	}
+	if validity.Status != "valid" {
+		fmt.Printf("RESULT: %s (device time)\n", validity.Status)
+		return 3
+	}
+
+	dir, err := os.MkdirTemp(tmpDir(), "keybox-verify-")
+	if err != nil {
+		fmt.Println("could not create verification workdir")
+		return 2
+	}
+	defer os.RemoveAll(dir)
+	out := filepath.Join(dir, "status.json")
 	used := ""
 	stale := false
 	for _, u := range candidates(accel) {
@@ -128,7 +155,6 @@ func Run(args []string) int {
 		fmt.Println("could not download Google status")
 		return 2
 	}
-	defer os.Remove(out)
 	fmt.Printf("status: %s\n", used)
 	if stale {
 		fmt.Println("note: stale mirror, newer revocations may be missing")
@@ -149,6 +175,10 @@ func Run(args []string) int {
 		}
 		fmt.Println("RESULT: revoked")
 		return 1
+	}
+	if stale {
+		fmt.Println("RESULT: unknown (serial absent from stale mirror; current revocation status unavailable)")
+		return 2
 	}
 	fmt.Printf("revocation: %d certs checked, none revoked\n", len(serials))
 	fmt.Println("RESULT: not revoked")

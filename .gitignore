@@ -3,5 +3,5 @@ dist/
 webroot/
 bin/keyboxlite
 bin/keyboxlite.upx
-icon.png
+/icon.png
 *.DS_Store

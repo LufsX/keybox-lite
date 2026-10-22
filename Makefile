@@ -11,10 +11,10 @@ build:
 	sh build.sh
 
 webui:
-	@[ -d webui/node_modules ] || ( echo 'installing webui deps...'; cd webui && npm install --no-audit --no-fund --registry=https://registry.npmmirror.com )
+	@[ -d webui/node_modules ] || ( echo 'installing webui deps...'; cd webui && npm ci --no-audit --no-fund )
 	cd webui && npm run build
 
-package: build webui
+package:
 	sh package.sh
 
 clean:

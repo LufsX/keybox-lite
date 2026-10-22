@@ -1,39 +1,79 @@
-import { spawn, toast as ksuToast, enableEdgeToEdge as ksuEdgeToEdge } from "kernelsu"
+import { toast as ksuToast, enableEdgeToEdge as ksuEdgeToEdge } from "kernelsu"
 
 export interface ExecResult {
   errno: number
   stdout: string
   stderr: string
+  failure?: "unavailable" | "bridge" | "timeout"
 }
 
+interface NativeBridge {
+  spawn(command: string, args: string, options: string, callback: string): void
+}
+
+type BridgeWindow = { ksu?: NativeBridge; [name: string]: unknown }
+let callbackCounter = 0
+
 /**
- * Run a command through KernelSU's WebUI bridge.
- *
- * We use spawn, not exec: the native exec callback only fires after the whole shell job
- * finishes, which freezes the WebView for the duration (a network update can take
- * seconds). spawn enqueues the job and streams stdout/stderr back as events, so the UI
- * keeps painting. This mirrors what Duck ToolBox does.
+ * Use KernelSU's spawn protocol so commands stream output without blocking the UI.
+ * kernelsu 3.0.2 emits synchronous startup errors before callers can subscribe;
+ * register the native callback ourselves so those errors cannot leave a pending job.
+ * A timeout stops waiting only: the native API has no process cancellation method.
  */
-export function exec(command: string, onLine?: (line: string) => void): Promise<ExecResult> {
+export function exec(command: string, onLine?: (line: string) => void, timeoutMs = 15_000): Promise<ExecResult> {
   return new Promise((resolve) => {
     let stdout = ""
     let stderr = ""
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const host = window as unknown as BridgeWindow
+    const callback = `keybox_spawn_${Date.now()}_${callbackCounter++}`
+
+    function finish(errno: number, failure?: ExecResult["failure"], detail?: string) {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      delete host[callback]
+      if (detail) stderr += detail + "\n"
+      resolve({ errno, stdout, stderr, ...(failure ? { failure } : {}) })
+    }
+
+    function data(stream: "stdout" | "stderr", event: string, value: unknown) {
+      if (settled || event !== "data" || typeof value !== "string") return
+      if (stream === "stdout") stdout += value + "\n"
+      else stderr += value + "\n"
+      try {
+        onLine?.(value)
+      } catch (error) {
+        // A UI listener must not prevent the process from completing and cleaning up.
+        console.error("Command output listener failed", error)
+      }
+    }
+
     try {
-      // Native spawn appends a space after the command even with no args; the newline
-      // keeps that space off a possible here-document terminator.
-      const child = spawn(command + "\n", [])
-      child.stdout.on("data", (data: string) => {
-        stdout += data + "\n"
-        onLine?.(data)
-      })
-      child.stderr.on("data", (data: string) => {
-        stderr += data + "\n"
-        onLine?.(data)
-      })
-      child.on("exit", (code: number) => resolve({ errno: code, stdout, stderr }))
-      child.on("error", (err: unknown) => resolve({ errno: -1, stdout, stderr: String(err) }))
-    } catch (e) {
-      resolve({ errno: -1, stdout, stderr: String(e) })
+      if (typeof host.ksu?.spawn !== "function") {
+        finish(-1, "unavailable")
+        return
+      }
+      host[callback] = {
+        stdout: { emit: (event: string, value: unknown) => data("stdout", event, value) },
+        stderr: { emit: (event: string, value: unknown) => data("stderr", event, value) },
+        emit(event: string, value: unknown) {
+          if (event === "exit") {
+            if (typeof value === "number" && Number.isInteger(value) && value >= 0) finish(value)
+            else finish(-1, "bridge", "Process exited without a valid exit code")
+          } else if (event === "error") {
+            finish(-1, "bridge", value instanceof Error ? value.message : String(value))
+          }
+        },
+      }
+      timer = setTimeout(() => finish(-1, "timeout"), timeoutMs)
+      // KernelSU runs a libsu job inside a managed shell. Keep `exit` (including
+      // errors in compound commands) inside a subshell so libsu can still collect
+      // the job status. Newlines also protect comments and here-doc terminators.
+      host.ksu.spawn("(\n" + command + "\n)\n", "[]", "{}", callback)
+    } catch (error) {
+      finish(-1, "bridge", error instanceof Error ? error.message : String(error))
     }
   })
 }

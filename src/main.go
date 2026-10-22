@@ -4,14 +4,19 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"time"
 
+	"keyboxlite/internal/backend"
 	"keyboxlite/internal/catalog"
 	"keyboxlite/internal/decode"
 	"keyboxlite/internal/info"
 	"keyboxlite/internal/keybox"
 	"keyboxlite/internal/status"
+	"keyboxlite/internal/updatejob"
 	"keyboxlite/internal/verify"
 )
 
@@ -20,10 +25,40 @@ func main() {
 		usage()
 	}
 	switch os.Args[1] {
+	case "run-update":
+		os.Exit(updatejob.Run(os.Args[2:]))
+	case "cancel-update":
+		os.Exit(updatejob.Cancel(os.Args[2:]))
 	case "decode-meow":
 		check(decode.Meow(os.Stdin, os.Stdout))
+	case "backend":
+		os.Exit(backend.Run(os.Args[2:]))
+	case "prepare":
+		if len(os.Args) != 3 {
+			fail(errors.New("prepare needs <backend>; XML on stdin"))
+		}
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, 1024*1024+1))
+		if err != nil {
+			fail(err)
+		}
+		cleaned, err := keybox.Prepare(data, os.Args[2])
+		if err != nil {
+			fail(err)
+		}
+		_, err = os.Stdout.Write(cleaned)
+		check(err)
+	case "decode-addon":
+		check(decode.Addon(os.Stdin, os.Stdout))
 	case "decode-spectre":
 		check(decode.Spectre(os.Stdin, os.Stdout))
+	case "spectre-urls":
+		urls, err := catalog.URLs(os.Args[2:])
+		if err != nil {
+			fail(err)
+		}
+		for _, url := range urls {
+			fmt.Println(url)
+		}
 	case "spectre-url":
 		url, src, ver, err := catalog.PickURL(os.Args[2:])
 		if err != nil {
@@ -36,7 +71,11 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
-		for _, s := range keybox.Serials(kb) {
+		serials, err := keybox.ParseSerials(kb)
+		if err != nil {
+			fail(err)
+		}
+		for _, s := range serials {
 			fmt.Println(s)
 		}
 	case "check":
@@ -64,10 +103,19 @@ func runCheck(args []string) int {
 		fmt.Fprintln(os.Stderr, "  (not a keybox: missing AndroidAttestation)")
 		return 2
 	}
-	serials := keybox.Serials(kb)
-	if len(serials) == 0 {
+	serials, err := keybox.ParseSerials(kb)
+	if err != nil || len(serials) == 0 {
 		fmt.Fprintln(os.Stderr, "  (could not parse certificate serials)")
 		return 2
+	}
+	validity, err := keybox.CheckValidity(kb, time.Now())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  (validity: %v)\n", err)
+		return 2
+	}
+	if validity.Status != "valid" {
+		fmt.Printf("  validity: %s (device time)\n", validity.Status)
+		return 3
 	}
 	data, err := os.ReadFile(args[1])
 	if err != nil {
@@ -91,13 +139,13 @@ func runCheck(args []string) int {
 
 func read(args []string, n int, msg string) ([]byte, error) {
 	if len(args) < n+1 {
-		return nil, fmt.Errorf(msg)
+		return nil, errors.New(msg)
 	}
 	return os.ReadFile(args[n])
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: keyboxlite decode-meow|decode-spectre|spectre-url|serials|check|info|verify ...")
+	fmt.Fprintln(os.Stderr, "usage: keyboxlite backend|prepare|decode-meow|decode-spectre|decode-addon|spectre-url|spectre-urls|serials|check|info|verify ...")
 	os.Exit(2)
 }
 

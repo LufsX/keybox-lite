@@ -1,48 +1,69 @@
 #!/system/bin/sh
-# Keybox Lite scheduler: runs action.sh when the configured interval has elapsed.
-# Lightweight: no network, no wakelock, one local check every 30 minutes.
-MODDIR=$(dirname "$0")
-CONF=/data/adb/keybox-lite.conf
-LOG=/data/local/tmp/keybox-update.log
-LOCK=/data/local/tmp/keybox-scheduler.lock
+# One scheduler per module. Failed updates retry at the next 30-minute check.
+MODDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+KBL_LIBRARY=1
+. "$MODDIR/settings.sh" || exit 1
+unset KBL_LIBRARY
+kbl_init && kbl_enabled && kbl_read_conf || exit 1
+case "$SCHEDULE" in daily|weekly) ;; *) exit 0 ;; esac
 
-interval_for() {
-    case "$1" in
-        daily) echo 86400 ;;
-        weekly) echo 604800 ;;
-        *) echo 0 ;;
-    esac
+if [ "$1" != --worker ]; then
+    sh "$MODDIR/service.sh" --worker >/dev/null 2>&1 &
+    exit 0
+fi
+
+[ ! -L "$STATE/scheduler.lock" ] || exit 1
+exec 9>> "$STATE/scheduler.lock" || exit 1
+kbl_flock -n 9 || exit 0
+CHILD=
+cleanup() {
+    trap '' HUP INT TERM
+    if [ -n "$CHILD" ]; then
+        kill -TERM "$CHILD" 2>/dev/null
+        wait "$CHILD" 2>/dev/null
+    fi
+    rm -f "$STATE/scheduler.pid" "$STATE/scheduler.pid.$$"
 }
+trap cleanup 0
+trap 'exit 1' HUP INT TERM
+start=$(kbl_process_token "$$") || exit 1
+printf '%s %s\n' "$$" "$start" > "$STATE/scheduler.pid.$$" &&
+    mv -f "$STATE/scheduler.pid.$$" "$STATE/scheduler.pid" || exit 1
 
-SCHEDULE=off
-LAST_RUN=0
-[ -f "$CONF" ] && . "$CONF" 2>/dev/null
-[ -n "$SCHEDULE" ] || SCHEDULE=off
-[ -n "$LAST_RUN" ] || LAST_RUN=0
-
-INTERVAL=$(interval_for "$SCHEDULE")
-[ "$INTERVAL" -gt 0 ] || exit 0
-
-mkdir "$LOCK" 2>/dev/null || exit 0
-
-(
-    while true; do
-        now=$(date +%s)
-        if [ $((now - LAST_RUN)) -ge "$INTERVAL" ]; then
-            sh "$MODDIR/action.sh" >> "$LOG" 2>&1
-            LAST_RUN=$(date +%s)
-            printf 'SCHEDULE=%s\nLAST_RUN=%s\n' "$SCHEDULE" "$LAST_RUN" > "$CONF"
+while kbl_enabled; do
+    kbl_read_conf || exit 1
+    case "$SCHEDULE" in
+        daily) INTERVAL=86400 ;;
+        weekly) INTERVAL=604800 ;;
+        *) exit 0 ;;
+    esac
+    now=$(date +%s) || exit 1
+    kbl_timestamp "$now" || exit 1
+    now=$kbl_number
+    if [ "$LAST_RUN" -gt "$now" ] || [ $((now - LAST_RUN)) -ge "$INTERVAL" ]; then
+        # action.sh writes its own log; redirecting stdout there duplicates each
+        # line and races its log replacement. Children must not retain fd 9.
+        sh "$MODDIR/action.sh" >/dev/null 2>&1 9>&- &
+        CHILD=$!
+        wait "$CHILD"
+        result=$?
+        CHILD=
+        if [ "$result" -eq 0 ]; then
+            completed=$(date +%s) || exit 1
+            kbl_timestamp "$completed" || exit 1
+            completed=$kbl_number
+            kbl_config_lock || exit 1
+            # Reload under the same lock as settings.set, preserving changes
+            # made while the download was running, including SCHEDULE=off.
+            if kbl_enabled && kbl_read_conf; then
+                LAST_RUN=$completed
+                kbl_write_conf || { kbl_config_unlock; exit 1; }
+            fi
+            kbl_config_unlock
         fi
-        sleep 1800
-        SCHEDULE=off
-        LAST_RUN=0
-        [ -f "$CONF" ] && . "$CONF" 2>/dev/null
-        [ -n "$SCHEDULE" ] || SCHEDULE=off
-        INTERVAL=$(interval_for "$SCHEDULE")
-        if [ "$INTERVAL" -le 0 ]; then
-            rm -rf "$LOCK"
-            exit 0
-        fi
-    done
-) &
-exit 0
+    fi
+    sleep 1800 9>&- &
+    CHILD=$!
+    wait "$CHILD"
+    CHILD=
+done

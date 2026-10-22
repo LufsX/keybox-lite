@@ -46,7 +46,7 @@ func rot13(data []byte) []byte {
 
 // Meow decodes the MeowDump "Megatron" pipeline: base64 x10 -> hex -> ROT13.
 func Meow(r io.Reader, w io.Writer) error {
-	data, err := io.ReadAll(r)
+	data, err := readSource(r)
 	if err != nil {
 		return err
 	}
@@ -59,13 +59,12 @@ func Meow(r io.Reader, w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("hex: %w", err)
 	}
-	_, err = w.Write(rot13(raw))
-	return err
+	return writeSource(w, rot13(raw))
 }
 
 // Spectre decodes the dpejoh payload: shuffled base64 alphabet -> base64.
 func Spectre(r io.Reader, w io.Writer) error {
-	data, err := io.ReadAll(r)
+	data, err := readSource(r)
 	if err != nil {
 		return err
 	}
@@ -82,6 +81,5 @@ func Spectre(r io.Reader, w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("base64: %w", err)
 	}
-	_, err = w.Write(raw)
-	return err
+	return writeSource(w, raw)
 }

@@ -1,14 +1,31 @@
 #!/bin/sh
-# Build the Go binary, pack it with UPX, and assemble the module zip into dist/.
-set -e
+# Build and assemble a module zip from an explicit runtime file list.
+set -eu
 cd "$(dirname "$0")"
 sh build.sh
-cp -f bin/keyboxlite.upx bin/keyboxlite
+if [ ! -d webui/node_modules ]; then
+    (cd webui && npm ci --no-audit --no-fund)
+fi
+(cd webui && npm run build)
 cp -f webui/public/icon.png icon.png
 VERSION=$(sed -n 's/^version=//p' module.prop)
+case "$VERSION" in
+    ""|*[!A-Za-z0-9._-]*) echo "invalid module version" >&2; exit 1 ;;
+esac
 mkdir -p dist
 OUT="dist/keybox-lite-$VERSION.zip"
-rm -f "$OUT"
-zip -r -X "$OUT" . \
-  -x 'src/*' 'webui/*' 'dist/*' 'build.sh' 'package.sh' 'Makefile' 'README.md' '.gitignore' '.git/*' 'bin/keyboxlite.upx' '*.DS_Store' >/dev/null
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+trap 'exit 1' HUP INT TERM
+mkdir -p "$STAGE/bin"
+cp module.prop action.sh sources.sh settings.sh service.sh customize.sh uninstall.sh icon.png THIRD_PARTY_NOTICES.md "$STAGE/"
+cp -R META-INF webroot "$STAGE/"
+if [ -f bin/keyboxlite.upx ]; then
+    cp bin/keyboxlite.upx "$STAGE/bin/keyboxlite"
+else
+    cp bin/keyboxlite "$STAGE/bin/keyboxlite"
+fi
+DEST="$PWD/$OUT"
+(cd "$STAGE" && zip -r -X module.zip module.prop action.sh sources.sh settings.sh service.sh customize.sh uninstall.sh icon.png THIRD_PARTY_NOTICES.md bin META-INF webroot >/dev/null)
+mv -f "$STAGE/module.zip" "$DEST"
 echo "packaged $OUT ($(wc -c < "$OUT") bytes)"
