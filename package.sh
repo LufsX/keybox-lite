@@ -10,5 +10,5 @@ mkdir -p dist
 OUT="dist/keybox-lite-$VERSION.zip"
 rm -f "$OUT"
 zip -r -X "$OUT" . \
-  -x 'src/*' 'webui/*' 'dist/*' 'build.sh' 'package.sh' 'README.md' '.git/*' 'bin/keyboxlite.upx' '*.DS_Store' >/dev/null
+  -x 'src/*' 'webui/*' 'dist/*' 'build.sh' 'package.sh' 'Makefile' 'README.md' '.gitignore' '.git/*' 'bin/keyboxlite.upx' '*.DS_Store' >/dev/null
 echo "packaged $OUT ($(wc -c < "$OUT") bytes)"
