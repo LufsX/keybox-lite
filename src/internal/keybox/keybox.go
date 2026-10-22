@@ -1,12 +1,10 @@
 // Package keybox parses keybox.xml and extracts certificate serial numbers.
 //
-// No crypto/x509: a minimal DER walker reads the serial directly, which keeps the
-// binary small and still matches openssl.
+// A DER walker reads certificate serials without importing crypto/x509.
 package keybox
 
 import (
 	"bytes"
-	"encoding/pem"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -75,18 +73,16 @@ func parse(data []byte, certificates bool, inspect func([]byte) error) ([]string
 				if err := decoder.DecodeElement(&certificate, &token); err != nil {
 					return nil, fmt.Errorf("certificate XML: %w", err)
 				}
-				text := bytes.TrimSpace(normalize([]byte(certificate.Text)))
-				block, rest := pem.Decode(text)
-				if len(certificate.Children) != 0 || !bytes.HasPrefix(text, []byte("-----BEGIN CERTIFICATE-----\n")) ||
-					block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
+				der, ok := preparePEM([]byte(certificate.Text), "CERTIFICATE")
+				if len(certificate.Children) != 0 || !ok {
 					return nil, fmt.Errorf("invalid certificate PEM")
 				}
-				serial, ok := serialOf(block.Bytes)
+				serial, ok := serialOf(der)
 				if !ok {
 					return nil, fmt.Errorf("invalid certificate DER")
 				}
 				if inspect != nil {
-					if err := inspect(block.Bytes); err != nil {
+					if err := inspect(der); err != nil {
 						return nil, err
 					}
 				}

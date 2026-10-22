@@ -14,8 +14,9 @@ import (
 const maxPrepareBytes = 1 << 20
 
 // Prepare cleans a keybox and checks its structure and backend compatibility.
-// DER checks are deliberately structural: this does not prove private-key
-// arithmetic, key/certificate correspondence, certificate signatures or trust.
+// DER checks validate encoding, field structure and key/leaf-certificate algorithms.
+// EC scalar/public-point consistency is checked. RSA arithmetic, key/certificate
+// correspondence, signatures and trust are not evaluated here.
 // Time validity and revocation must be checked separately before installation.
 func Prepare(data []byte, backend string) ([]byte, error) {
 	backend = strings.ReplaceAll(backend, "-", "_")
@@ -268,11 +269,25 @@ func prepareCount(value string) (int, bool) {
 	return n, err == nil && n <= maxPrepareBytes
 }
 
-func preparePEM(text []byte, kind string) ([]byte, bool) {
+// singlePEM rejects prefixes that pem.Decode would silently skip while searching
+// for a later valid block. Indentation and surrounding whitespace remain supported.
+func singlePEM(text []byte) *pem.Block {
 	text = bytes.TrimSpace(normalize(text))
-	header := []byte("-----BEGIN " + kind + "-----\n")
+	if !bytes.HasPrefix(text, []byte("-----BEGIN ")) ||
+		bytes.Count(text, []byte("-----BEGIN ")) != 1 ||
+		bytes.Count(text, []byte("-----END ")) != 1 {
+		return nil
+	}
 	block, rest := pem.Decode(text)
-	if !bytes.HasPrefix(text, header) || block == nil || block.Type != kind || len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 {
+	if block == nil || len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 {
+		return nil
+	}
+	return block
+}
+
+func preparePEM(text []byte, kind string) ([]byte, bool) {
+	block := singlePEM(text)
+	if block == nil || block.Type != kind {
 		return nil, false
 	}
 	return block.Bytes, true

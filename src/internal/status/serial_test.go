@@ -3,7 +3,7 @@ package status
 import "testing"
 
 func TestGoogleHexSerialRegression(t *testing.T) {
-	// Public serial from the reported certificate. Do not include private key material.
+	// Decimal 100664404977750268806995 is hexadecimal 15510740886364958753.
 	data := []byte(`{"entries":{"15510740886364958753":{"status":"REVOKED","reason":"KEY_COMPROMISE"}}}`)
 	got, err := Check(data, []string{"100664404977750268806995"})
 	if err != nil || len(got) != 1 || got[0].Status != "REVOKED" || got[0].Reason != "KEY_COMPROMISE" {

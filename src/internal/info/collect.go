@@ -11,8 +11,8 @@ import (
 	"keyboxlite/internal/keybox"
 )
 
-// collect keeps existing keybox status fields while adding selected/all backend
-// metadata. Failed detection never guesses a default Tricky Store file.
+// collect reports keybox status and selected/all backend metadata.
+// Failed detection leaves the path empty unless an explicit override is provided.
 func collect(root, override string) map[string]interface{} {
 	report, detectionErr := backend.Detect(root)
 	devicePath := ""
@@ -29,6 +29,7 @@ func collect(root, override string) map[string]interface{} {
 		"modified":        int64(0),
 		"structure_valid": false,
 		"serials":         []string{},
+		"integrity":       keybox.Integrity{Status: "unknown", Keys: []keybox.KeyIntegrity{}},
 		"validity":        keybox.Validity{Status: "unknown", Certificates: []keybox.CertificateValidity{}},
 		"backend":         report.Selected,
 		"backends":        report.Backends,
@@ -75,5 +76,6 @@ func collect(root, override string) map[string]interface{} {
 	result["serials"] = keybox.Serials(data)
 	validity, _ := keybox.CheckValidity(data, time.Now())
 	result["validity"] = validity
+	result["integrity"] = keybox.CheckIntegrity(data)
 	return result
 }

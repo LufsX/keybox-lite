@@ -1,8 +1,12 @@
 package main
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
@@ -17,19 +21,27 @@ import (
 
 func TestReportedRevokedSerialEndToEnd(t *testing.T) {
 	dir := t.TempDir()
-	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	// Use a synthetic certificate with the reported public serial, never the user's private key.
-	serial, _ := new(big.Int).SetString("15510740886364958753", 16)
-	cert := &x509.Certificate{
-		SerialNumber: serial, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-	}
-	der, err := x509.CreateCertificate(nil, cert, cert, key.Public(), key)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := "<AndroidAttestation><Certificate>\n" +
+	// Synthetic certificate with decimal serial 100664404977750268806995.
+	serial, _ := new(big.Int).SetString("15510740886364958753", 16)
+	cert := &x509.Certificate{
+		SerialNumber: serial, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		Subject: pkix.Name{CommonName: "synthetic"}, IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, cert, cert, key.Public(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := "<AndroidAttestation><Keybox><Key algorithm=\"ec\"><PrivateKey>" + string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: private})) + "</PrivateKey><CertificateChain><Certificate>\n" +
 		string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})) +
-		"</Certificate></AndroidAttestation>"
+		"</Certificate></CertificateChain></Key></Keybox></AndroidAttestation>"
 	path, list := filepath.Join(dir, "keybox.xml"), filepath.Join(dir, "status.json")
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
@@ -47,6 +59,27 @@ func TestReportedRevokedSerialEndToEnd(t *testing.T) {
 		if got := runCheck([]string{path, list}); got != tc.want {
 			t.Fatalf("got %d, want %d", got, tc.want)
 		}
+	}
+}
+
+func TestOfflineCheckRejectsMissingPrivateKey(t *testing.T) {
+	dir := t.TempDir()
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	template := &x509.Certificate{SerialNumber: big.NewInt(42), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(nil, template, template, key.Public(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := "<AndroidAttestation><Certificate>" + string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})) + "</Certificate></AndroidAttestation>"
+	path, list := filepath.Join(dir, "keybox.xml"), filepath.Join(dir, "status.json")
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(list, []byte(`{"entries":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := runCheck([]string{path, list}); got != 2 {
+		t.Fatalf("certificate without a private key passed: %d", got)
 	}
 }
 

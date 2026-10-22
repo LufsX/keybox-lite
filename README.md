@@ -1,17 +1,16 @@
 # Keybox Lite
 
-A lightweight KernelSU / APatch / Magisk module that updates the Tricky Store / TEESimulator
+A KernelSU / APatch / Magisk module that updates the Tricky Store / TEESimulator
 / OhMyKeymint keybox from the module Action button or the built-in WebUI.
 
 - **Sources**: MeowDump "Megatron", then dpejoh "spectre", tried in order.
-  The Tricky Addon decoder remains opt-in; its default endpoint currently serves
-  an empty body and is excluded from automatic updates. Spectre tries each eligible candidate through
-  cleanup, backend validation and certificate checks before accepting it.
-- **Decoding / ASN.1 / revocation check** run in a small Go binary (`bin/keyboxlite`, static arm64).
+  Tricky Addon decoding is opt-in and excluded from automatic updates. Spectre tries
+  each eligible candidate through cleanup, backend validation and certificate checks
+  before accepting it.
+- **Decoding / ASN.1 / revocation check** run in a Go binary (`bin/keyboxlite`, static arm64).
   Semantics: base64 x10 + hex + ROT13, shuffled base64, X.509 serial extraction, Google
   attestation status matching (live, then a stale GitHub mirror).
-- **Downloads** stay in the shell: curl/wget already solve Android's DNS and TLS, and a Go
-  `net/http` client would cost ~1 MB more and still need a resolver.
+- **Downloads** use curl/wget, invoked by the shell and Go's `os/exec`.
 - **Install** runs entirely within Keybox Lite. Duck ToolBox is not required and
   is never invoked, even if installed. Backend rules and paths follow its supported
   implementations. Every install backs up the old file and atomically replaces it,
@@ -52,11 +51,10 @@ Only TEESimulator’s default profile is updated; per-app custom profiles are no
 
 Before installation the XML is cleaned of comments/BOM/zero-width markers, structurally
 validated, and checked against the selected backend. Keybox Lite checks PEM/DER shape
-and key/leaf-certificate algorithm compatibility; it does not prove private/public
-key correspondence, private-key arithmetic, chain signatures or trust.
+and key/leaf-certificate algorithm compatibility. Cryptographic key correspondence,
+private-key arithmetic, chain signatures and trust are not checked.
 The backend and target are rechecked before replacement. No daemon is restarted
-automatically, matching Duck’s keybox installation behavior. Real Android reload,
-SELinux labels and consumer access still need device testing.
+automatically, matching Duck’s keybox installation behavior.
 
 Diagnostic commands:
 
@@ -95,36 +93,20 @@ Spectre prefers clean entries, then softbanned entries, excluding revoked entrie
 ignoring unverified `working`/`autoOverride` hints. Download, decode or validation
 failure advances to the next candidate. Catalog flags never replace certificate checks.
 The downloader/decoder/parser limit source files to 1 MiB (wget size is checked after
-download); all candidates still require current time validity and a usable revocation list.
+download); all candidates require current time validity and a usable revocation list.
 
-The Addon URL and format match Duck’s default provider. An actual GET on 2026-10-22
-returned HTTP 200 with a zero-byte body, both directly and through the configured
-proxy. It cannot supply a keybox and is excluded from the default `SOURCES` in
-`action.sh`. Decoder support remains for manual use if a usable provider becomes
-available; an empty response is always rejected. The integration tests use generated
-data and mock downloads and do not establish live source availability. Duck’s manual
-repository browser uses interactive selection/download tokens and CAPTCHA, so it is
-not an unattended source here. Bundled AOSP keys, generated “unknown” keys, local import,
-device RKP enrollment and arbitrary custom provider UI are outside this update flow.
+The Addon URL and format match Duck’s default provider. Addon is excluded from the
+default `SOURCES` in `action.sh`; manual use requires adding `addon` to that list.
+Empty responses are rejected. Integration tests use generated data and mock downloads.
+Duck’s manual repository browser requires interactive selection/download tokens and CAPTCHA.
 
-Compatibility/source references and the retained MIT notice are in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Duck ToolBox source attribution, reference revision and MIT license are retained in
+[sources.sh](sources.sh).
 
-## Build
-
-Requires Go, Node.js/npm and zip. UPX is optional; without it the package uses the
-uncompressed static binary.
-
-    sh package.sh              # build everything -> dist/keybox-lite-<version>.zip
-    # or: make package
-
-Individual build steps:
-
-    sh build.sh                # Go binary + optional UPX
-    (cd webui && npm ci && npm run build)  # WebUI -> webroot/
-
-Packaging includes only module runtime files. The source icon lives at
-`webui/public/icon.png`; generated binaries, WebUI output and archives are ignored.
+Build dependencies are Go, Node.js/npm and zip. UPX compression is optional;
+without UPX, the module contains the uncompressed static binary. Archives contain
+module runtime files. The source icon is `webui/public/icon.png`; generated binaries,
+WebUI output and archives are ignored by Git.
 
 ## Development checks
 
@@ -139,8 +121,6 @@ Packaging includes only module runtime files. The source icon lives at
     (cd webui && npm run check && npm test && npm run build)
 
 See [AGENTS.md](AGENTS.md) for architecture, compatibility and validation guidelines.
-Android installation, boot scheduling and the real root-manager bridge still require
-device testing.
 
 ## WebUI
 

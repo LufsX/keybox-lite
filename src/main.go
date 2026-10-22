@@ -1,6 +1,6 @@
 // Command keyboxlite: keybox helpers for the Keybox Lite module.
 //
-// Networking stays in the shell; this binary is pure computation.
+// Downloads invoke curl/wget; update jobs run and cancel shell process groups.
 package main
 
 import (
@@ -132,6 +132,10 @@ func runCheck(args []string) int {
 			fmt.Printf("  REVOKED: serial %s -> %s %s\n", e.Serial, e.Status, e.Reason)
 		}
 		return 1
+	}
+	if keybox.CheckIntegrity(kb).Status != "valid" {
+		fmt.Fprintln(os.Stderr, "  (private key or certificate chain validation failed)")
+		return 2
 	}
 	fmt.Printf("  revocation: %d certs checked, none revoked\n", len(serials))
 	return 0

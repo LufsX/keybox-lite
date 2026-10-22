@@ -1,8 +1,11 @@
 package verify
 
 import (
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -14,17 +17,30 @@ import (
 
 func testKeybox(t *testing.T, dir string, dates ...time.Time) string {
 	t.Helper()
-	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	cert := &x509.Certificate{SerialNumber: big.NewInt(42), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	t.Setenv("KB_STATUS_CACHE", filepath.Join(dir, "status-cache"))
+	return testKeyboxSerial(t, dir, 42, dates...)
+}
+
+func testKeyboxSerial(t *testing.T, dir string, serial int64, dates ...time.Time) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := &x509.Certificate{SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: "synthetic"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
 	if len(dates) == 2 {
 		cert.NotBefore, cert.NotAfter = dates[0], dates[1]
 	}
-	der, err := x509.CreateCertificate(nil, cert, cert, key.Public(), key)
+	der, err := x509.CreateCertificate(rand.Reader, cert, cert, key.Public(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "keybox.xml")
-	data := "<AndroidAttestation><Keybox><Key><CertificateChain><Certificate>\n" +
+	private, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := "<AndroidAttestation><Keybox><Key algorithm=\"ec\"><PrivateKey>" + string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: private})) + "</PrivateKey><CertificateChain><Certificate>\n" +
 		string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})) +
 		"</Certificate></CertificateChain></Key></Keybox></AndroidAttestation>"
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
@@ -90,10 +106,10 @@ esac
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.mode == "fallback" && string(requests) != "https://accel.invalid/"+live+"\n"+live+"\n" {
+			if tc.mode == "fallback" && !strings.Contains(string(requests), live+"\n") {
 				t.Fatalf("did not retry direct status after malformed response: %s", requests)
 			}
-			if tc.mode == "invalid" && len(strings.Fields(string(requests))) != len(candidates("https://accel.invalid/")) {
+			if tc.mode == "invalid" && len(strings.Fields(string(requests))) != len(statusURLs("https://accel.invalid/", live))+len(statusURLs("https://accel.invalid/", mirror)) {
 				t.Fatalf("did not exhaust candidates: %s", requests)
 			}
 			if data, err := os.ReadFile(legacy); err != nil || string(data) != "do not touch" {
@@ -104,6 +120,51 @@ esac
 				t.Fatalf("verification workdirs leaked: %v, %v", leftovers, err)
 			}
 		})
+	}
+}
+
+func TestRunRejectsInvalidCryptographyBeforeNetwork(t *testing.T) {
+	dir := t.TempDir()
+	path := testKeybox(t, dir)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalECPrivateKey(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(original), "<PrivateKey>") + len("<PrivateKey>")
+	end := strings.Index(string(original), "</PrivateKey>")
+	mismatch := string(original[:start]) + string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})) + string(original[end:])
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(dir, "download-attempted")
+	stub := "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do if [ \"$1\" = -o ]; then shift; out=$1; fi; shift; done\nprintf '%s' attempted > \"$FAKE_LOG\"\nprintf '%s' '{\"entries\":{}}' > \"$out\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(stub), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("FAKE_LOG", log)
+	t.Setenv("TMPDIR", dir)
+	if err := os.WriteFile(path, []byte(mismatch), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := Run([]string{path}); got != 2 {
+		t.Fatalf("mismatched private key passed: %d", got)
+	}
+	if _, err := os.Stat(log); !os.IsNotExist(err) {
+		t.Fatalf("invalid keybox reached downloader: %v", err)
+	}
+	workdirs, err := filepath.Glob(filepath.Join(dir, "keybox-verify-*"))
+	if err != nil || len(workdirs) != 0 {
+		t.Fatalf("invalid keybox reached downloader: %v, %v", workdirs, err)
 	}
 }
 

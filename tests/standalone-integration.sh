@@ -13,7 +13,7 @@ import("crypto/ecdsa";"crypto/elliptic";"crypto/rand";"crypto/x509";"encoding/ba
 func main(){
  key,err:=ecdsa.GenerateKey(elliptic.P256(),rand.Reader);if err!=nil{panic(err)}
  priv,err:=x509.MarshalECPrivateKey(key);if err!=nil{panic(err)}
- cert:=&x509.Certificate{SerialNumber:big.NewInt(42),NotBefore:time.Now().Add(-time.Hour),NotAfter:time.Now().Add(time.Hour)}
+ cert:=&x509.Certificate{SerialNumber:big.NewInt(42),NotBefore:time.Now().Add(-time.Hour),NotAfter:time.Now().Add(time.Hour),IsCA:true,BasicConstraintsValid:true,KeyUsage:x509.KeyUsageCertSign}
  der,err:=x509.CreateCertificate(rand.Reader,cert,cert,&key.PublicKey,key);if err!=nil{panic(err)}
  p:=string(pem.EncodeToMemory(&pem.Block{Type:"EC PRIVATE KEY",Bytes:priv}))
  c:=string(pem.EncodeToMemory(&pem.Block{Type:"CERTIFICATE",Bytes:der}))
@@ -43,13 +43,14 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "${CANCEL_PAUSE:-0}" = 1 ]; then
     sleep 120 &
-    echo $! > "$ROOT/download-pid"
+    echo $! >> "$ROOT/download-pid"
     : > "$ROOT/download-started"
     wait
 fi
 case "$url" in
     *attestation/status)
-        printf '%s' "$STATUS_JSON" > "$out"
+        if [ -n "$out" ] && [ "$out" != - ]; then printf '%s' "$STATUS_JSON" > "$out"
+        else printf '%s' "$STATUS_JSON"; fi
         ;;
     *Megatron)
         [ "${ADDON_ONLY:-0}" != 1 ] || exit 22
@@ -71,6 +72,7 @@ export STATUS_JSON='{"entries":{}}'
 fixture() {
     ROOT="$SANDBOX/$1"
     export ROOT
+    export KB_STATUS_CACHE="$ROOT/data/adb/keybox-lite/status-cache"
     mkdir -p "$ROOT/mod/bin" "$ROOT/data/adb/modules/$2" "$ROOT/data/local/tmp"
     printf 'id=%s\nversionCode=%s\n' "$2" "$3" > "$ROOT/data/adb/modules/$2/module.prop"
     for file in action.sh sources.sh settings.sh; do
@@ -129,7 +131,7 @@ action
 echo 'ok: new backend target directories are traversable; existing directory mode retained'
 
 fixture addon tricky_store 246
-# Addon is opt-in: the public default endpoint currently serves an empty body.
+# Enable Addon to test its decoder and installation with a synthetic payload.
 sed 's/^SOURCES="meow spectre"$/SOURCES="meow spectre addon"/' "$ROOT/mod/action.sh" > "$ROOT/mod/action.tmp"
 mv "$ROOT/mod/action.tmp" "$ROOT/mod/action.sh"
 export ADDON_ONLY=1
@@ -153,8 +155,10 @@ done
 if wait "$job"; then echo 'FAIL: cancelled update succeeded'; cat "$ROOT/action.log"; exit 1; fi
 [ "$(cat "$ROOT/data/adb/tricky_store/keybox.xml")" = old ]
 [ ! -e "$ROOT/data/adb/keybox-lite/update-job.json" ]
-child=$(cat "$ROOT/download-pid")
-if [ -f "/proc/$child/stat" ] && ! grep -q ') Z ' "/proc/$child/stat"; then echo 'FAIL: download child survived'; exit 1; fi
+for child in $(cat "$ROOT/download-pid"); do
+    if [ -f "/proc/$child/stat" ] && ! grep -q ') Z ' "/proc/$child/stat"; then echo 'FAIL: download child survived'; exit 1; fi
+done
+[ -z "$(find "$TMPDIR" -name 'keybox-lite.*' -type d -print)" ]
 unset CANCEL_PAUSE
 action
 echo 'ok: stalled download cancellation kills descendants, retains old keybox and releases locks for retry'
@@ -176,4 +180,6 @@ export STATUS_JSON='{"entries":{"2a":{"status":"REVOKED","reason":"KEY_COMPROMIS
 if action; then echo 'FAIL: revoked candidate installed'; exit 1; fi
 [ "$(cat "$ROOT/data/adb/tricky_store/keybox.xml")" = old ]
 [ ! -e "$TMPDIR/keybox-update.history" ]
-echo 'ok: real revoked certificate is rejected across all sources without replacement'
+grep -q 'rejecting this source and all its routes; trying other sources' "$ROOT/action.log"
+[ -z "$(find "$TMPDIR" -name 'keybox-lite.*' -type d -print)" ]
+echo 'ok: real revoked certificate eliminates its source, retains old keybox and cleans work files'

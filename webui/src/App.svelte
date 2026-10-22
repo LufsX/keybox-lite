@@ -3,30 +3,52 @@
   import { fade } from "svelte/transition"
   import {
     RefreshCw, Loader2, ShieldCheck, ShieldAlert, ShieldQuestion,
-    Terminal, Languages, HardDrive, Fingerprint, Download,
-    CalendarClock, History, ChevronDown, Monitor, Sun, Moon, Check, Square
+    Languages, HardDrive, Download,
+    CalendarClock, History, Monitor, Sun, Moon, Square
   } from "lucide-svelte"
   import { exec, toast, enableEdgeToEdge, type ExecResult } from "./lib/bridge"
-  import { messages, detect, type Locale } from "./lib/i18n"
+  import { messages, detect, isLocale, supportedLanguages, type Locale } from "./lib/i18n"
+  import { LogBuffer, stripAnsi, type LogLine } from "./lib/log"
+  import Dropdown from "./lib/components/Dropdown.svelte"
+  import LogOutput from "./lib/components/LogOutput.svelte"
+  import { ui } from "./lib/ui"
+  import CertificateDetails from "./lib/components/CertificateDetails.svelte"
+  import { parseCertificateStatus, certificateStatusForSerial, type CertificateVerification, type CertificateValidity, type ValidityStatus } from "./lib/certificateStatus"
 
   const MODULE_ID = "keybox-lite"
+  const badge = "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[7px] px-1.5 py-0.5 text-[11px] font-[550] leading-snug"
+  const statusValue = "flex min-h-[18px] items-center gap-1.5 text-xs font-semibold"
 
-  let lang = $state<Locale>(detect())
+  function savedLanguage(): Locale {
+    try {
+      const value = localStorage.getItem("keybox-lite-language")
+      if (isLocale(value)) return value
+    } catch { /* Storage can be disabled by the host. */ }
+    return detect()
+  }
+  let lang = $state<Locale>(savedLanguage())
   const m = $derived(messages[lang])
 
   type Theme = "system" | "light" | "dark"
   const themes: Theme[] = ["system", "light", "dark"]
   let themeOpen = $state(false)
-  let themeControl: HTMLDivElement
-  let themeButton: HTMLButtonElement
-  function dismissTheme(event: Event) {
-    if (event.target instanceof Node && !themeControl?.contains(event.target)) themeOpen = false
+  let languageOpen = $state(false)
+  const themeOptions = $derived(themes.map(value => ({
+    value, label: value === "system" ? m.themeSystem : value === "light" ? m.themeLight : m.themeDark,
+  })))
+  const languageOptions = supportedLanguages.map(({ code, nativeLabel }) => ({ value: code, label: nativeLabel, lang: code }))
+  function toggleTheme(open = !themeOpen) {
+    themeOpen = open
+    if (open) languageOpen = false
   }
-  function themeKeydown(event: KeyboardEvent) {
-    if (event.key === "Escape" && themeOpen) {
-      themeOpen = false
-      themeButton?.focus()
-    }
+  function toggleLanguage(open = !languageOpen) {
+    languageOpen = open
+    if (open) themeOpen = false
+  }
+  function setLanguage(value: Locale) {
+    lang = value
+    languageOpen = false
+    try { localStorage.setItem("keybox-lite-language", value) } catch { /* Keep the in-session choice. */ }
   }
   function savedTheme(): Theme {
     try {
@@ -45,7 +67,6 @@
   function setTheme(value: Theme) {
     theme = value
     themeOpen = false
-    themeButton?.focus()
     try { localStorage.setItem("keybox-lite-theme", value) } catch { /* Keep the in-session choice. */ }
   }
 
@@ -56,13 +77,6 @@
   const UPDATE_TIMEOUT = 75 * 60_000
   type Busy = "update" | "check" | "refresh" | "settings" | "log"
   type Schedule = "off" | "daily" | "weekly"
-  type ValidityStatus = "valid" | "expired" | "not_yet_valid" | "unknown"
-  interface CertificateValidity {
-    serial: string
-    not_before: number
-    not_after: number
-    status: ValidityStatus
-  }
   interface KeyboxInfo {
     path: string
     exists: boolean
@@ -71,6 +85,7 @@
     structure_valid: boolean
     serials: string[]
     validity?: { status: ValidityStatus; certificates: CertificateValidity[] }
+    integrity?: import("./lib/certificateStatus").KeyboxIntegrity
     backend?: { identity: string; active: boolean } | null
     backend_error?: string
   }
@@ -82,11 +97,33 @@
   let moddir = $state("")
   let info = $state<KeyboxInfo | null>(null)
   let output = $state("")
+  let savedLogVisible = $state(false)
   let error = $state("")
   let checkRc = $state<number | null>(null)
+  let certificateVerification = $state<CertificateVerification | null>(null)
+
+  function clearCertificateCheck() {
+    checkRc = null
+    certificateVerification = null
+  }
   let busy = $state<Busy | null>(null)
   let cancelling = $state(false)
   let cancelRequested = $state(false)
+  let updateRunning = $state(false)
+  let stopPending: Promise<void> | undefined
+  let outputTimer: ReturnType<typeof setTimeout> | undefined
+  let pendingOutput = ""
+  let disposed = false
+  const OUTPUT_LIMIT = 80_000
+  const logBuffer = new LogBuffer(OUTPUT_LIMIT)
+  let outputLines = $state.raw<LogLine[]>([])
+
+  function setOutput(text: string, append = false) {
+    if (append) logBuffer.append(text)
+    else logBuffer.replace(text)
+    output = logBuffer.text
+    outputLines = logBuffer.lines.slice()
+  }
 
   const schedules: Schedule[] = ["off", "daily", "weekly"]
   let schedule = $state<Schedule | null>(null)
@@ -153,8 +190,11 @@
     moddir = dir
   }
 
-  async function loadInfo() {
-    // Keep the previous snapshot while loading; mark it stale if the read fails.
+  function keyboxIdentity(value: KeyboxInfo | null): string {
+    return value ? JSON.stringify([value.path, value.exists, value.size, value.modified, value.serials, value.validity?.certificates, value.integrity]) : ""
+  }
+
+  async function readInfo(): Promise<KeyboxInfo> {
     const r = await exec('"' + bin + '" info')
     requireSuccess(r, m.infoFailed)
     const value: unknown = JSON.parse(r.stdout)
@@ -176,13 +216,41 @@
         throw new Error(m.invalidInfo)
       }
     }
+    if (v.integrity !== undefined) {
+      const integrity = v.integrity as KeyboxInfo["integrity"]
+      if (!integrity || !["valid", "invalid", "unknown"].includes(integrity.status) ||
+        !Array.isArray(integrity.keys) || !integrity.keys.every(k => k &&
+          ["ec", "rsa"].includes(k.algorithm) && typeof k.private_key_valid === "boolean" &&
+          typeof k.key_match === "boolean" && typeof k.chain_valid === "boolean" &&
+          ["google", "aosp_ec", "aosp_rsa", "knox", "unknown"].includes(k.root))) {
+        throw new Error(m.invalidInfo)
+      }
+    }
     if (v.backend != null) {
       const backend = v.backend as Record<string, unknown>
       if (typeof backend !== "object" || typeof backend.identity !== "string" || typeof backend.active !== "boolean") throw new Error(m.invalidInfo)
     }
     if (v.backend_error !== undefined && typeof v.backend_error !== "string") throw new Error(m.invalidInfo)
-    info = v as unknown as KeyboxInfo
-    infoStale = false
+    return v as unknown as KeyboxInfo
+  }
+
+  let infoSequence = 0
+  async function loadInfo(): Promise<KeyboxInfo | null> {
+    const sequence = ++infoSequence
+    try {
+      const nextInfo = await readInfo()
+      if (disposed || sequence !== infoSequence) return null
+      if (keyboxIdentity(info) !== keyboxIdentity(nextInfo)) clearCertificateCheck()
+      info = nextInfo
+      infoStale = false
+      return nextInfo
+    } catch (e) {
+      if (!disposed && sequence === infoSequence) {
+        infoStale = true
+        clearCertificateCheck()
+      }
+      throw e
+    }
   }
 
   async function loadMeta() {
@@ -215,7 +283,6 @@
       try {
         await load()
       } catch (e) {
-        if (load === loadInfo) infoStale = true
         errors.push(e instanceof Error ? e.message : String(e))
       }
     }
@@ -224,53 +291,128 @@
 
   async function refresh() {
     await run("refresh", async () => {
-      checkRc = null
       if (!moddir) await resolveDir()
       await reload()
     })
   }
 
+  function flushOutput() {
+    clearTimeout(outputTimer)
+    outputTimer = undefined
+    if (!disposed && pendingOutput) setOutput(pendingOutput, true)
+    pendingOutput = ""
+  }
+
   function appendOutput(line: string) {
-    output += line + "\n"
+    if (disposed) return
+    pendingOutput = (pendingOutput + stripAnsi(line + "\n")).slice(-OUTPUT_LIMIT)
+    outputTimer ??= setTimeout(flushOutput, 50)
   }
 
   async function update() {
     if (!moddir) return
     await run("update", async () => {
-      output = ""
-      checkRc = null
+      savedLogVisible = false
+      setOutput("")
+      clearCertificateCheck()
       cancelRequested = false
-      const r = await exec('sh "' + moddir + '/action.sh"', appendOutput, UPDATE_TIMEOUT)
-      if (r.errno !== 0 && !cancelRequested) error = failure(r, m.updateFailed)
-      toast(r.errno === 0 ? m.updateSuccess : cancelRequested ? m.updateStopped : m.updateFailed, r.errno === 0 || cancelRequested ? "ok" : "err")
-      await reload()
+      updateRunning = true
+      try {
+        const r = await exec('sh "' + moddir + '/action.sh"', appendOutput, UPDATE_TIMEOUT)
+        updateRunning = false
+        await stopPending
+        flushOutput()
+        const stopped = !r.failure && r.errno === 130 && cancelRequested
+        if (r.errno !== 0 && !stopped) error = failure(r, m.updateFailed)
+        toast(r.errno === 0 ? m.updateSuccess : stopped ? m.updateStopped : m.updateFailed, r.errno === 0 || stopped ? "ok" : "err")
+        await reload()
+      } finally {
+        updateRunning = false
+        cancelling = false
+        cancelRequested = false
+        stopPending = undefined
+        flushOutput()
+      }
     })
   }
 
-  async function stopUpdate() {
-    if (!bin || cancelling) return
+  function stopUpdate() {
+    if (!bin || !updateRunning || cancelling || cancelRequested) return
     cancelling = true
-    cancelRequested = true
-    try {
-      const r = await exec('"' + bin + '" cancel-update /data/adb/keybox-lite', appendOutput)
-      requireSuccess(r, m.stopFailed)
-    } catch (e) {
-      cancelRequested = false
-      error = e instanceof Error ? e.message : String(e)
-    } finally {
-      cancelling = false
-    }
+    error = ""
+    stopPending = (async () => {
+      try {
+        const r = await exec('"' + bin + '" cancel-update /data/adb/keybox-lite', appendOutput)
+        requireSuccess(r, m.stopFailed)
+        cancelRequested = true
+      } catch (e) {
+        error = e instanceof Error ? e.message : String(e)
+      } finally {
+        cancelling = false
+        flushOutput()
+      }
+    })()
+    return stopPending
+  }
+
+  function shellQuote(value: string): string {
+    return "'" + value.replace(/'/g, "'\"'\"'") + "'"
+  }
+
+  function verificationResult(verification: CertificateVerification, snapshot: KeyboxInfo): number {
+    const statuses = snapshot.serials.map(serial => certificateStatusForSerial(verification, serial).status)
+    if (statuses.some(status => status === "revoked" || status === "suspended")) return 1
+    if (verification.completed && (verification.source === "live" || verification.source === "cache") &&
+        verification.result === "not revoked" && statuses.length && statuses.every(status => status === "not-revoked")) return 0
+    return 2
   }
 
   async function checkRevocation() {
     if (!bin) return
     await run("check", async () => {
-      output = ""
-      checkRc = null
-      const r = await exec('"' + bin + '" verify', appendOutput, VERIFY_TIMEOUT)
-      checkRc = r.errno
-      // 1 = revoked, 2 = unavailable, 3 = outside certificate validity period.
-      if (r.failure || ![0, 1, 2, 3].includes(r.errno)) error = failure(r, m.checkFailed)
+      savedLogVisible = false
+      setOutput("")
+      clearCertificateCheck()
+      try {
+        const preSequence = infoSequence + 1
+        const before = await loadInfo()
+        if (preSequence !== infoSequence || !before || !before.exists || !before.structure_valid || !before.path.startsWith("/") ||
+            /[\x00-\x1f\x7f]/.test(before.path) || !before.serials.length) throw new Error(m.checkFailed)
+        const checkedIdentity = keyboxIdentity(before)
+        const checkedSequence = infoSequence
+        const r = await exec('"' + bin + '" verify ' + shellQuote(before.path), appendOutput, VERIFY_TIMEOUT)
+        flushOutput()
+        const uninterrupted = checkedSequence === infoSequence
+        const postSequence = infoSequence + 1
+        const after = await loadInfo()
+        if (disposed) return
+        if (!uninterrupted || postSequence !== infoSequence || !after || checkedIdentity !== keyboxIdentity(after)) {
+          clearCertificateCheck()
+          checkRc = 2
+          error = m.checkFailed
+          return
+        }
+        certificateVerification = parseCertificateStatus(r.stdout, r.failure ? null : r.errno)
+        checkRc = verificationResult(certificateVerification, after)
+        const validityLines = stripAnsi(r.stdout).trim().split("\n")
+        const timeResult = /^RESULT: (expired|not_yet_valid) \(device time\)$/.exec(validityLines[validityLines.length - 1])
+        if (!r.failure && r.errno === 3 && timeResult && certificateVerification.bySerial.size === 0 &&
+            certificateVerification.source === "unknown" && validityLines.filter(line => line.startsWith("RESULT:")).length === 1 &&
+            validityLines.some(line => /^\[FAIL\] validity: (expired|not_yet_valid) \([1-9][0-9]* certificates\)$/.exec(line)?.[1] === timeResult[1]) &&
+            (!after.validity || after.validity.status === timeResult[1])) {
+          checkRc = 3
+          certificateVerification = null
+        }
+        if (r.failure || checkRc === 2) error = failure(r, m.checkFailed)
+      } catch (e) {
+        if (!disposed) {
+          clearCertificateCheck()
+          checkRc = 2
+        }
+        throw e
+      } finally {
+        flushOutput()
+      }
     })
   }
 
@@ -289,7 +431,8 @@
     await run("log", async () => {
       const r = await exec('if [ -f /data/local/tmp/keybox-update.log ]; then tail -n 80 /data/local/tmp/keybox-update.log; fi')
       requireSuccess(r, m.logFailed)
-      output = r.stdout.trim() || m.noLog
+      setOutput(r.stdout.trim() || m.noLog)
+      savedLogVisible = true
     })
   }
 
@@ -305,93 +448,89 @@
     enableEdgeToEdge()
     void refresh()
     return () => {
+      disposed = true
+      clearTimeout(outputTimer)
+      outputTimer = undefined
+      pendingOutput = ""
       media.removeEventListener("change", syncMotion)
       colorMedia.removeEventListener("change", syncColor)
     }
   })
 </script>
 
-<svelte:window onpointerdown={dismissTheme} onfocusin={dismissTheme} onkeydown={themeKeydown} />
-
 <div class="app-shell">
-  <main class="page">
-    <header class="page-header">
-      <img class="brand-icon" src="./icon.svg" alt="" width="44" height="44" />
-      <div class="brand"><h1>Keybox Lite</h1><p>{m.subtitle}</p></div>
-      <div class="header-actions">
-        <div class="theme-control" bind:this={themeControl}>
-          <button class="icon-button" bind:this={themeButton} onclick={() => (themeOpen = !themeOpen)} title={m.theme} aria-label={m.theme} aria-expanded={themeOpen} aria-controls="theme-options">
+  <main class="mx-auto w-full max-w-[640px] px-3 pt-3 pb-5 max-[359px]:px-2">
+    <header class="mb-3 flex items-center gap-2">
+      <img class="block size-11 shrink-0 max-[359px]:size-[38px]" src="./icon.svg" alt="" width="44" height="44" />
+      <div class="min-w-0 flex-1 [&_h1]:text-xl [&_h1]:font-[650] [&_h1]:leading-[1.35] [&_h1]:tracking-[-.6px] [&_h1]:max-[359px]:text-lg [&_p]:mt-0.5 [&_p]:text-xs [&_p]:text-[var(--muted)]"><h1>Keybox Lite</h1><p>{m.subtitle}</p></div>
+      <div class="flex items-center {ui.buttonGroup}">
+        <Dropdown id="theme-options" label={m.theme} options={themeOptions} selected={theme} open={themeOpen} {reducedMotion} onOpenChange={toggleTheme} onSelect={setTheme}>
+          {#snippet trigger()}
             {#if theme === "system"}<Monitor size={18} />{:else if theme === "light"}<Sun size={18} />{:else}<Moon size={18} />{/if}
-          </button>
-          {#if themeOpen}
-            <div id="theme-options" class="theme-options" role="group" aria-label={m.theme} in:fade={{ duration: reducedMotion ? 0 : 140 }}>
-              {#each themes as option}
-                <button onclick={() => setTheme(option)} aria-pressed={theme === option} class:active={theme === option}>
-                  {#if option === "system"}<Monitor size={15} />{:else if option === "light"}<Sun size={15} />{:else}<Moon size={15} />{/if}
-                  <span>{option === "system" ? m.themeSystem : option === "light" ? m.themeLight : m.themeDark}</span>
-                  {#if theme === option}<Check size={14} />{/if}
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
-        <button class="icon-button" onclick={() => (lang = lang === "zh" ? "en" : "zh")} title={m.language} aria-label={m.language}><Languages size={18} /></button>
+          {/snippet}
+          {#snippet optionIcon(option)}
+            {#if option === "system"}<Monitor size={15} />{:else if option === "light"}<Sun size={15} />{:else}<Moon size={15} />{/if}
+          {/snippet}
+        </Dropdown>
+        <Dropdown id="language-options" label={m.language} options={languageOptions} selected={lang} open={languageOpen} {reducedMotion} onOpenChange={toggleLanguage} onSelect={setLanguage}>
+          {#snippet trigger()}<Languages size={18} />{/snippet}
+        </Dropdown>
       </div>
     </header>
 
     {#if error}
-      <div role="alert" class="error-message" in:fade={{ duration: reducedMotion ? 0 : 180 }}>
+      <div role="alert" class="mb-2 flex items-start gap-1.5 rounded-xl bg-[var(--red-bg)] px-2.5 py-2 text-xs leading-relaxed text-[var(--red)] [overflow-wrap:anywhere] [&_svg]:mt-0.5" in:fade={{ duration: reducedMotion ? 0 : 180 }}>
         <ShieldAlert size={17} /><span>{error}</span>
       </div>
     {/if}
 
-    <section class="panel overview" aria-busy={!initialDone || busy === "refresh"}>
-      <div class="panel-heading">
-        <h2><HardDrive size={17} />{m.installed}</h2>
-        <span class="subtle loading-label" role="status">
-          {#if !initialDone || busy === "refresh"}<Loader2 size={13} class="spin" />{m.loading}{/if}
+    <section class="{ui.panel} relative" aria-busy={!initialDone || busy === "refresh"}>
+      <div class="{ui.heading}">
+        <h2 class={ui.headingTitle}><HardDrive size={17} />{m.installed}</h2>
+        <span class="flex min-h-[18px] items-center gap-1.5 whitespace-nowrap text-[11px] text-[var(--muted)]" role="status">
+          {#if !initialDone || busy === "refresh"}<Loader2 size={13} class="motion-safe:animate-spin" />{m.loading}{/if}
         </span>
       </div>
-      <div class="overview-body">
+      <div class="min-h-[184px]">
         {#if !initialDone}
-          <div class="skeleton-content" aria-hidden="true">
-            <div class="badge-row"><span class="skeleton sk-badge"></span><span class="skeleton sk-badge"></span></div>
-            <div class="skeleton sk-label"></div><div class="skeleton sk-path"></div>
-            <div class="facts-grid">
-              {#each [1, 2, 3] as item}<div class="skeleton sk-fact"></div>{/each}
+          <div  aria-hidden="true">
+            <div class="mb-2 flex flex-wrap gap-1.5"><span class="block h-[21px] w-[74px] animate-pulse rounded-md bg-[var(--inset)] motion-reduce:animate-none"></span><span class="block h-[21px] w-[74px] animate-pulse rounded-md bg-[var(--inset)] motion-reduce:animate-none"></span></div>
+            <div class="mb-2 block h-[13px] w-8 animate-pulse rounded-md bg-[var(--inset)] motion-reduce:animate-none"></div><div class="block h-[18px] w-[92%] animate-pulse rounded-md bg-[var(--inset)] motion-reduce:animate-none"></div>
+            <div class="my-2.5 grid grid-cols-[.8fr_.7fr_1.5fr] gap-2 [&>div]:min-w-0 [&_dt]:text-[11px] [&_dt]:leading-snug [&_dt]:text-[var(--muted)] [&_dt]:[overflow-wrap:anywhere] [&_dd]:mt-0.5 [&_dd]:text-sm [&_dd]:font-[550] [&_dd]:tabular-nums">
+              {#each [1, 2, 3] as item}<div class="block h-9 animate-pulse rounded-md bg-[var(--inset)] motion-reduce:animate-none"></div>{/each}
             </div>
-            <div class="status-grid"><div class="skeleton sk-status"></div><div class="skeleton sk-status"></div></div>
+            <div class="grid grid-cols-2 gap-1.5"><div class="block h-[52px] animate-pulse rounded-[9px] bg-[var(--inset)] motion-reduce:animate-none"></div><div class="block h-[52px] animate-pulse rounded-[9px] bg-[var(--inset)] motion-reduce:animate-none"></div></div>
           </div>
         {:else if info}
-          <div class="loaded-content" in:fade={{ duration: reducedMotion ? 0 : 260 }}>
-            {#if infoStale}<p class="stale-note" role="status">{m.staleData}</p>{/if}
-            {#if info.backend_error}<p class="stale-note" role="status">{info.backend_error}</p>{/if}
-            <div class="badge-row">
-              {#if info.backend}<span class="badge" class:bad={!info.backend.active}>{info.backend.identity}{info.backend.active ? "" : " · " + m.backendInactive}</span>{/if}
+          <div  in:fade={{ duration: reducedMotion ? 0 : 260 }}>
+            {#if infoStale}<p class="mb-1.5 text-[11px] text-[var(--red)]" role="status">{m.staleData}</p>{/if}
+            {#if info.backend_error}<p class="mb-1.5 text-[11px] text-[var(--red)]" role="status">{info.backend_error}</p>{/if}
+            <div class="mb-2 flex flex-wrap gap-1.5">
+              {#if info.backend}<span class={badge + (!info.backend.active ? " bg-[var(--red-bg)] text-[var(--red)]" : " bg-[var(--inset)] text-[var(--muted)]")}>{info.backend.identity}{info.backend.active ? "" : " · " + m.backendInactive}</span>{/if}
               {#if info.exists}
-                <span class="field-label badge-caption">XML</span>
-                <span class="badge" class:good={structureOk} class:bad={!structureOk}>
+                <span class="self-center text-[11px] leading-snug text-[var(--muted)]">XML</span>
+                <span class={badge + (structureOk ? " bg-[var(--accent-bg)] text-[var(--accent)]" : " bg-[var(--red-bg)] text-[var(--red)]")}>
                   {#if structureOk}<ShieldCheck size={12} />{:else}<ShieldAlert size={12} />{/if}
                   {structureOk ? m.valid : m.invalid}
                 </span>
-              {:else}<span class="badge">{m.noKeybox}</span>{/if}
+              {:else}<span class={badge + " bg-[var(--inset)] text-[var(--muted)]"}>{m.noKeybox}</span>{/if}
             </div>
-            <div class="path-block"><span class="field-label">{m.path}</span><p class="file-path">{info.path}</p></div>
-            <dl class="facts-grid">
+            <div ><span class="text-[11px] leading-snug text-[var(--muted)]">{m.path}</span><p class="mt-0.5 font-mono text-xs leading-normal [overflow-wrap:anywhere]">{info.path}</p></div>
+            <dl class="my-2.5 grid grid-cols-[.8fr_.7fr_1.5fr] gap-2 [&>div]:min-w-0 [&_dt]:text-[11px] [&_dt]:leading-snug [&_dt]:text-[var(--muted)] [&_dt]:[overflow-wrap:anywhere] [&_dd]:mt-0.5 [&_dd]:text-sm [&_dd]:font-[550] [&_dd]:tabular-nums">
               <div><dt>{m.size}</dt><dd>{fmtSize(info.size)}</dd></div>
               <div><dt>{m.certs}</dt><dd>{info.serials.length}</dd></div>
-              <div><dt>{m.modified}</dt><dd class="date-value">{fmtTime(info.modified)}</dd></div>
+              <div><dt>{m.modified}</dt><dd class="!text-[11px] !font-normal leading-relaxed">{fmtTime(info.modified)}</dd></div>
             </dl>
             {#if info.exists}
-              <div class="status-grid">
-                <div class="status-tile">
-                  <span class="field-label">{m.validity}</span>
-                  <span class="status-value" class:bad={info.validity?.status === "expired" || info.validity?.status === "not_yet_valid"} class:good={info.validity?.status === "valid"}>{validityLabel(info.validity?.status)}</span>
+              <div class="grid grid-cols-2 gap-1.5">
+                <div class="flex min-w-0 flex-col gap-1 rounded-[9px] bg-[var(--inset)] p-2">
+                  <span class="text-[11px] leading-snug text-[var(--muted)]">{m.validity}</span>
+                  <span class={statusValue + (info.validity?.status === "valid" ? " text-[var(--accent)]" : info.validity?.status === "expired" || info.validity?.status === "not_yet_valid" ? " text-[var(--red)]" : "")}>{validityLabel(info.validity?.status)}</span>
                 </div>
-                <div class="status-tile" aria-live="polite">
-                  <span class="field-label">{m.revocationStatus}</span>
-                  <span class="status-value" class:bad={checkRc === 1} class:not-revoked={checkRc === 0}>
-                    {#if busy === "check"}<Loader2 size={13} class="spin" />{m.checking}
+                <div class="flex min-w-0 flex-col gap-1 rounded-[9px] bg-[var(--inset)] p-2" aria-live="polite">
+                  <span class="text-[11px] leading-snug text-[var(--muted)]">{m.revocationStatus}</span>
+                  <span class={statusValue + (checkRc === 1 ? " text-[var(--red)]" : checkRc === 0 ? " text-[var(--success)]" : "")}>
+                    {#if busy === "check"}<Loader2 size={13} class="motion-safe:animate-spin" />{m.checking}
                     {:else}{checkRc === 0 ? m.notRevoked : checkRc === 1 ? m.revoked : checkRc === null ? m.unchecked : checkRc === 3 ? m.timeInvalid : m.unavailable}{/if}
                   </span>
                 </div>
@@ -399,81 +538,52 @@
             {/if}
           </div>
         {:else}
-          <div class="empty-state" in:fade={{ duration: reducedMotion ? 0 : 180 }}><ShieldQuestion size={26} /><p>{m.readFailed}</p></div>
+          <div class="flex min-h-[170px] flex-col items-center justify-center gap-3 text-[13px] text-[var(--muted)]" in:fade={{ duration: reducedMotion ? 0 : 180 }}><ShieldQuestion size={26} /><p>{m.readFailed}</p></div>
         {/if}
       </div>
     </section>
 
-    <div class="action-grid">
-      <button class="button primary" onclick={update} disabled={busy !== null || !moddir}>
-        {#if busy === "update"}<Loader2 size={17} class="spin" />{:else}<Download size={17} />{/if}
-        {busy === "update" ? m.updating : m.update}
+    <div class="my-2 grid grid-cols-2 {ui.buttonGroup}">
+      <button class={ui.button + " col-span-full " + (busy === "update" ? "bg-[var(--red-bg)] text-[var(--red)]" : "bg-[#4768ca] text-white hover:enabled:bg-[#3958b4]")} onclick={busy === "update" ? stopUpdate : update}
+        disabled={!moddir || (busy === "update" ? !updateRunning || cancelling || cancelRequested : busy !== null)}>
+        {#if busy === "update"}
+          {#if cancelling || cancelRequested || !updateRunning}<Loader2 size={17} class="motion-safe:animate-spin" />{:else}<Square size={17} />{/if}
+          {cancelling ? m.stopping : cancelRequested ? m.stopRequested : !updateRunning ? m.refreshing : m.stopUpdate}
+        {:else}<Download size={17} />{m.update}{/if}
       </button>
-      <button class="button secondary" onclick={checkRevocation} disabled={busy !== null || !moddir}>
-        {#if busy === "check"}<Loader2 size={16} class="spin" />{:else}<ShieldCheck size={16} />{/if}
+      <button class="{ui.button} border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]" onclick={checkRevocation} disabled={busy !== null || !moddir}>
+        {#if busy === "check"}<Loader2 size={16} class="motion-safe:animate-spin" />{:else}<ShieldCheck size={16} />{/if}
         {busy === "check" ? m.checking : m.check}
       </button>
-      <button class="button secondary" onclick={refresh} disabled={busy !== null}>
-        {#if busy === "refresh"}<Loader2 size={16} class="spin" />{:else}<RefreshCw size={16} />{/if}
+      <button class="{ui.button} border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]" onclick={refresh} disabled={busy !== null}>
+        {#if busy === "refresh"}<Loader2 size={16} class="motion-safe:animate-spin" />{:else}<RefreshCw size={16} />{/if}
         {busy === "refresh" ? m.refreshing : m.refresh}
       </button>
     </div>
 
-    <button class="stop-update" onclick={stopUpdate} disabled={cancelling || !moddir}>
-      {#if cancelling}<Loader2 size={14} class="spin" />{:else}<Square size={13} />{/if}
-      {cancelling ? m.stopping : m.stopUpdate}
-    </button>
+    <CertificateDetails certificates={info?.validity?.certificates} serials={info?.serials}
+      verification={certificateVerification} integrity={info?.integrity} messages={m} bind:open={detailsOpen} />
 
-    <section class="panel certificate-panel">
-      <button class="disclosure" onclick={() => (detailsOpen = !detailsOpen)} aria-expanded={detailsOpen} aria-controls="certificate-details" disabled={!info?.serials.length}>
-        <span><Fingerprint size={17} />{m.certificateDetails}</span>
-        <span class="disclosure-end"><span class="count">{info?.serials.length ?? "—"}</span><ChevronDown size={16} class={detailsOpen ? "chevron open" : "chevron"} /></span>
-      </button>
-      <div id="certificate-details" class="details-reveal" class:expanded={detailsOpen} inert={!detailsOpen}>
-        <div class="details-reveal-inner">
-          <div class="certificate-list">
-            <p class="detail-note">{m.deviceTimeNote}</p>
-            {#if info?.validity?.certificates.length}
-              {#each info.validity.certificates as cert, index}
-                <article class="certificate">
-                  <div class="certificate-heading"><h3>{m.certificate} {index + 1}</h3><span class="badge" class:bad={cert.status === "expired" || cert.status === "not_yet_valid"}>{validityLabel(cert.status)}</span></div>
-                  <p class="serial">{cert.serial}</p>
-                  <dl class="certificate-dates">
-                    <div><dt>{m.notBefore}</dt><dd>{new Date(cert.not_before * 1000).toLocaleString()}</dd></div>
-                    <div><dt>{m.notAfter}</dt><dd>{new Date(cert.not_after * 1000).toLocaleString()}</dd></div>
-                  </dl>
-                </article>
-              {/each}
-            {:else}
-              {#each info?.serials ?? [] as sn}<p class="serial">{sn}</p>{/each}
-            {/if}
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading"><h2><CalendarClock size={17} />{m.schedule}</h2></div>
-      <div class="segmented-control">
+    <section class="{ui.panel}">
+      <div class="{ui.heading}"><h2 class={ui.headingTitle}><CalendarClock size={17} />{m.schedule}</h2></div>
+      <div class="grid grid-cols-3 rounded-[10px] bg-[var(--inset)] p-0.5 {ui.buttonGroup}">
         {#each schedules as opt}
-          <button onclick={() => setSchedule(opt)} disabled={busy !== null || !moddir} aria-pressed={schedule === opt} class:active={schedule === opt}>{m[opt]}</button>
+          <button onclick={() => setSchedule(opt)} disabled={busy !== null || !moddir} aria-pressed={schedule === opt} class={"min-h-8 min-w-0 rounded-lg px-0.5 py-0.5 text-xs leading-normal transition-colors disabled:opacity-60 " + (schedule === opt ? "bg-[var(--panel)] font-semibold text-[var(--accent)] shadow-sm" : "text-[var(--muted)]")}>{m[opt]}</button>
         {/each}
       </div>
-      {#if schedule && schedule !== "off"}<p class="detail-note schedule-note">{m.lastRun}: {lastRun ? fmtTime(lastRun) : "—"}</p>{/if}
+      {#if schedule && schedule !== "off"}<p class="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{m.lastRun}: {lastRun ? fmtTime(lastRun) : "—"}</p>{/if}
     </section>
 
-    <section class="panel">
-      <div class="panel-heading"><h2><History size={17} />{m.records}</h2>{#if version}<span class="count">v{version}</span>{/if}</div>
+    <section class="{ui.panel}">
+      <div class="{ui.heading}"><h2 class={ui.headingTitle}><History size={17} />{m.records}</h2>{#if version}<span class="whitespace-nowrap rounded-md bg-[var(--inset)] px-1.5 py-0.5 text-[11px] text-[var(--muted)]">v{version}</span>{/if}</div>
       {#if !initialDone}
-        <div class="records-skeleton" aria-hidden="true"><div class="skeleton sk-path"></div><div class="skeleton sk-path"></div></div>
+        <div class="grid gap-1.5" aria-hidden="true"><div class="block h-[18px] w-[92%] animate-pulse rounded-md bg-[var(--inset)] motion-reduce:animate-none"></div><div class="block h-[18px] w-[92%] animate-pulse rounded-md bg-[var(--inset)] motion-reduce:animate-none"></div></div>
       {:else if records.length}
-        <div class="record-list" in:fade={{ duration: reducedMotion ? 0 : 220 }}>{#each records as r}<p>{r}</p>{/each}</div>
-      {:else}<p class="detail-note">{m.noRecords}</p>{/if}
+        <div class="max-h-[180px] overflow-y-auto [&_p]:border-b [&_p]:border-[var(--line)] [&_p]:py-1.5 [&_p]:font-mono [&_p]:text-[11px] [&_p]:leading-normal [&_p]:text-[var(--muted)] [&_p]:[overflow-wrap:anywhere] [&_p:last-child]:border-0" in:fade={{ duration: reducedMotion ? 0 : 220 }}>{#each records as r}<p>{r}</p>{/each}</div>
+      {:else}<p class="text-[11px] leading-relaxed text-[var(--muted)]">{m.noRecords}</p>{/if}
     </section>
 
-    <section class="panel output-panel">
-      <div class="panel-heading"><h2><Terminal size={17} />{m.output}</h2><button class="text-button" onclick={showLog} disabled={busy !== null || !moddir}>{m.showLog}</button></div>
-      <pre>{output || m.hint}</pre>
-    </section>
+    <LogOutput {output} lines={outputLines} title={savedLogVisible ? m.savedUpdateLog : m.output} hint={m.hint}
+      viewSavedLogLabel={m.savedUpdateLog} disabled={busy !== null || !moddir} onViewSavedLog={showLog} />
   </main>
 </div>

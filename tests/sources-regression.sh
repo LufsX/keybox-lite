@@ -49,9 +49,12 @@ dl() {
     esac
 }
 kbl_validate_candidate() {
+    [ -z "${TEMP_PATHS:-}" ] || printf '%s\n' "$TMPDIR" >> "$TEMP_PATHS"
     printf '%s\n' "$(cat "$1")" >> "$VALIDATIONS"
+    if [ "${REVOKE_SOURCE:-0}" = 1 ]; then : > "$SANDBOX/rejected-source"; return 1; fi
     [ "$(cat "$1")" != REJECT ] && [ "${VALIDATE_RC:-0}" = 0 ]
 }
+kbl_source_rejected() { [ -e "$SANDBOX/rejected-source" ]; }
 . "$REPO/sources.sh"
 
 reset_case() {
@@ -59,6 +62,8 @@ reset_case() {
     : > "$VALIDATIONS"
     printf '%s\n' OLD_OUTPUT > "$SANDBOX/output"
     VALIDATE_RC=0
+    REVOKE_SOURCE=0
+    rm -f "$SANDBOX/rejected-source"
     unset MEOW_URL ADDON_URL SPECTRE_BASE SPECTRE_CATALOG
 }
 assert_clean() {
@@ -96,6 +101,16 @@ if grep -q unused "$REQUESTS"; then fail "spectre downloaded after acceptance"; 
 assert_clean
 ok "spectre candidate fallback after download, decode and validation failures"
 
+reset_case
+REVOKE_SOURCE=1
+CATALOG_FIXTURE='https://example.test/reject
+https://example.test/good'
+if kbl_fetch_source spectre "$SANDBOX/output"; then fail "revoked Spectre accepted"; fi
+[ "$(wc -l < "$REQUESTS" | tr -d ' ')" = 2 ] || fail "revoked Spectre tried next candidate"
+[ "$(cat "$VALIDATIONS")" = REJECT ] || fail "revoked Spectre validated next candidate"
+assert_old
+ok "source rejection callback stops Spectre without changing ordinary validator failures"
+
 for source in meow addon; do
     for url in download-fails decode-fails decode-empty reject; do
         reset_case
@@ -129,5 +144,22 @@ ln -s "$SANDBOX/output" "$SANDBOX/symlink-output"
 if kbl_fetch_source addon "$SANDBOX/symlink-output"; then fail "symlink output accepted"; fi
 assert_clean
 ok "validator nonzero exits and unsafe output paths fail closed"
+
+reset_case
+TEMP_PATHS="$SANDBOX/temporary-paths"
+caller_tmp=${TMPDIR:-}
+kbl_fetch_source meow "$SANDBOX/concurrent-meow" &
+meow_pid=$!
+kbl_fetch_source addon "$SANDBOX/concurrent-addon" &
+addon_pid=$!
+wait "$meow_pid" || fail "concurrent meow failed"
+wait "$addon_pid" || fail "concurrent addon failed"
+[ "$(sort -u "$TEMP_PATHS" | wc -l | tr -d ' ')" = 2 ] || fail "sources shared temporary state"
+while IFS= read -r source_tmp; do
+    case "$source_tmp" in "$WORK"/source.*) ;; *) fail "source TMPDIR escaped private directory" ;; esac
+done < "$TEMP_PATHS"
+[ "${TMPDIR:-}" = "$caller_tmp" ] || fail "source changed caller TMPDIR"
+assert_clean
+ok "concurrent sources use independent temporary directories and preserve caller state"
 
 echo "Source regression tests passed."

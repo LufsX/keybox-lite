@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"keyboxlite/internal/termfmt"
 )
 
 type record struct {
@@ -56,7 +58,7 @@ func run(script, state string, budget, pulse time.Duration) int {
 	}
 	defer lock.Close()
 	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		fmt.Println("ERROR: another keybox update is running")
+		termfmt.Println("ERROR: another keybox update is running")
 		return 1
 	}
 	cancelFile := filepath.Join(state, "update-cancel.json")
@@ -114,7 +116,7 @@ func run(script, state string, budget, pulse time.Duration) int {
 		case err := <-done:
 			var cancelled record
 			if data, e := os.ReadFile(cancelFile); e == nil && json.Unmarshal(data, &cancelled) == nil && cancelled.PID == pid && cancelled.Start == start {
-				fmt.Println("Update cancelled.")
+				termfmt.Println("[STOP] Update cancelled.")
 				return 130
 			}
 			if err == nil {
@@ -126,12 +128,12 @@ func run(script, state string, budget, pulse time.Duration) int {
 			}
 			return 130
 		case <-ticker.C:
-			fmt.Printf("  update running (%ds elapsed); Stop update is available in WebUI\n", int(time.Since(began).Seconds()))
+			termfmt.Printf("[WAIT] Update running · %ds elapsed\n", int(time.Since(began).Seconds()))
 		case <-signals:
-			fmt.Println("Stopping update and its download processes...")
+			termfmt.Println("[STOP] Stopping update and downloads...")
 			return stop(pid, done)
 		case <-deadline.C:
-			fmt.Println("ERROR: update exceeded 20-minute limit; stopping")
+			termfmt.Println("[FAIL] Update exceeded 20-minute limit; stopping.")
 			return stop(pid, done)
 		}
 	}
@@ -156,7 +158,7 @@ func Cancel(args []string) int {
 	}
 	b, err := os.ReadFile(filepath.Join(args[0], "update-job.json"))
 	if os.IsNotExist(err) {
-		fmt.Println("No managed update is running.")
+		termfmt.Println("[IDLE] No update is running.")
 		return 0
 	}
 	var r record
@@ -176,7 +178,7 @@ func Cancel(args []string) int {
 		return 1
 	}
 	if !same(r) {
-		fmt.Println("Update already finished.")
+		termfmt.Println("[DONE] Update already finished.")
 		return 0
 	}
 	if err = syscall.Kill(-r.PID, syscall.SIGTERM); err != nil {
@@ -187,7 +189,7 @@ func Cancel(args []string) int {
 	// Escalate if a command ignores TERM and holds up the shell's traps.
 	for i := 0; i < 20; i++ {
 		if !same(r) {
-			fmt.Println("Update stopped.")
+			termfmt.Println("[STOP] Update stopped.")
 			return 0
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -198,6 +200,6 @@ func Cancel(args []string) int {
 			return 1
 		}
 	}
-	fmt.Println("Update termination requested (PID " + strconv.Itoa(r.PID) + ").")
+	termfmt.Println("[STOP] Termination requested (PID " + strconv.Itoa(r.PID) + ").")
 	return 0
 }

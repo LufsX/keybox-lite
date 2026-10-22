@@ -40,7 +40,7 @@ type Target struct {
 	InstallMode string  `json:"install_mode"`
 	NewFileMode string  `json:"new_file_mode"`
 	// Reload describes the integration behavior: no service is started or restarted.
-	// Duck's installer also only publishes the file; device reload needs device testing.
+	// Duck's keybox installer also replaces the file without restarting a service.
 	Reload      string `json:"reload"`
 	ConfigError string `json:"config_error,omitempty"`
 }

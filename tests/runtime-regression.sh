@@ -71,6 +71,7 @@ MOCK
     cat > "$TEST_ROOT/mock/curl" <<'MOCK'
 #!/bin/sh
 printf 'download\n' >> "$TEST_ROOT/downloads"
+[ "${SECOND_ACTION:-0}" != 1 ] || : > "$TEST_ROOT/second-downloaded"
 while [ "$#" -gt 0 ]; do
     if [ "$1" = -o ]; then shift; out=$1; fi
     shift
@@ -144,7 +145,7 @@ MOCK
 chmod +x "$TEST_ROOT/mock/busybox"
 action || fail 'curl failure did not fall back to BusyBox wget'
 [ -e "$TEST_ROOT/used-busybox" ] || fail 'fallback downloader not invoked'
-grep -q 'downloader: busybox' "$TEST_ROOT/action-output" || fail 'downloader selection not logged'
+grep -q 'Downloading with busybox' "$TEST_ROOT/action-output" || fail 'downloader selection not logged'
 grep -q 'curl exit 22' "$TEST_ROOT/action-output" || fail 'curl failure not logged'
 ok 'curl failure falls back to BusyBox with diagnostic output'
 
@@ -164,7 +165,7 @@ for rc in 1 2 3 7; do
     [ -e "$TEST_ROOT/verified" ] || fail 'verification did not run'
     [ ! -e "$TMPDIR/keybox-update.history" ] || fail 'failed verification recorded as installed'
     no_staging
-    ok "verification exit $rc retains old keybox (including unavailable status)"
+    ok "verification exit $rc retains old keybox"
 done
 
 fixture decode-failure
@@ -228,10 +229,10 @@ action &
 first=$!
 JOBS="$JOBS $first"
 wait_file "$TEST_ROOT/download-entered"
-if sh "$TEST_ROOT/mod/action.sh" > "$TEST_ROOT/second-output" 2>&1; then fail 'concurrent action accepted'; fi
+if SECOND_ACTION=1 sh "$TEST_ROOT/mod/action.sh" > "$TEST_ROOT/second-output" 2>&1; then fail 'concurrent action accepted'; fi
 grep -q 'another keybox update is running' "$TEST_ROOT/second-output" || fail 'missing contention error'
 unchanged
-[ "$(wc -l < "$TEST_ROOT/downloads")" -eq 1 ] || fail 'second action started downloading'
+[ ! -e "$TEST_ROOT/second-downloaded" ] || fail 'second action started downloading'
 : > "$TEST_ROOT/release-download"
 wait "$first" || fail 'lock owner failed'
 JOBS=

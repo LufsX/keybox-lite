@@ -1,10 +1,13 @@
 package keybox
 
-import "bytes"
+import (
+	"bytes"
+	"crypto/elliptic"
+	"math/big"
+)
 
-// These readers only check DER shape and supported encodings. They deliberately
-// avoid crypto packages and do not validate elliptic-curve points, RSA factors,
-// signature arithmetic or private/public key correspondence.
+// These readers check DER shape, supported encodings and EC private-key points.
+// RSA factors, signature arithmetic and key/certificate correspondence are not checked.
 type prepareDER struct {
 	data []byte
 	pos  int
@@ -189,11 +192,31 @@ func prepareEC(body []byte, outerWidth int) bool {
 	if width == 0 || len(scalar) != width || bytes.Equal(scalar, make([]byte, width)) || (width == 66 && scalar[0] > 1) {
 		return false
 	}
+	var curve elliptic.Curve
+	switch width {
+	case 28:
+		curve = elliptic.P224()
+	case 32:
+		curve = elliptic.P256()
+	case 48:
+		curve = elliptic.P384()
+	case 66:
+		curve = elliptic.P521()
+	default:
+		return false
+	}
+	if new(big.Int).SetBytes(scalar).Cmp(curve.Params().N) >= 0 {
+		return false
+	}
 	if !r.done() {
 		public, valid := r.take(0xa1)
 		bits := prepareDER{data: public}
 		point, pointOK := bits.take(3)
 		if !valid || !pointOK || !bits.done() || !preparePoint(point, width) {
+			return false
+		}
+		x, y := curve.ScalarBaseMult(scalar)
+		if !bytes.Equal(point[1:], elliptic.Marshal(curve, x, y)) {
 			return false
 		}
 	}
@@ -223,7 +246,7 @@ func prepareCertificate(der []byte) (string, bool) {
 	if !ok || len(signature) < 2 || signature[0] != 0 || !r.done() {
 		return "", false
 	}
-	// Reuse the small existing readers for canonical serial and time encoding;
+	// Check canonical serial and time encoding;
 	// no comparison with the current time is made here.
 	if _, valid := serialOf(der); !valid {
 		return "", false

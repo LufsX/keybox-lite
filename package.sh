@@ -18,7 +18,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 trap 'exit 1' HUP INT TERM
 mkdir -p "$STAGE/bin"
-cp module.prop action.sh sources.sh settings.sh service.sh customize.sh uninstall.sh icon.png THIRD_PARTY_NOTICES.md "$STAGE/"
+cp module.prop action.sh sources.sh settings.sh service.sh customize.sh uninstall.sh icon.png "$STAGE/"
 cp -R META-INF webroot "$STAGE/"
 if [ -f bin/keyboxlite.upx ]; then
     cp bin/keyboxlite.upx "$STAGE/bin/keyboxlite"
@@ -26,6 +26,6 @@ else
     cp bin/keyboxlite "$STAGE/bin/keyboxlite"
 fi
 DEST="$PWD/$OUT"
-(cd "$STAGE" && zip -r -X module.zip module.prop action.sh sources.sh settings.sh service.sh customize.sh uninstall.sh icon.png THIRD_PARTY_NOTICES.md bin META-INF webroot >/dev/null)
+(cd "$STAGE" && zip -r -X module.zip module.prop action.sh sources.sh settings.sh service.sh customize.sh uninstall.sh icon.png bin META-INF webroot >/dev/null)
 mv -f "$STAGE/module.zip" "$DEST"
 echo "packaged $OUT ($(wc -c < "$OUT") bytes)"

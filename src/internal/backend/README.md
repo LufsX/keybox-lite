@@ -22,7 +22,7 @@ dot or parent components, backslashes or control characters. Existing path
 components must not be symlinks, and an existing final target must be a regular
 file. Malformed JSON, invalid setting types and unsafe paths produce an error
 and an empty `keybox_path`; they never cause installation into a guessed
-default. This is deliberately stricter than Duck's fallback for invalid input.
+default.
 Only the default profile is managed; other profiles' keyboxes are left alone.
 
 ## Go and CLI
@@ -46,28 +46,22 @@ Both installation outputs reject missing, inactive or unsafe selected targets
 with status 1 and empty stdout. Bad CLI arguments return 2. Success returns 0.
 The caller must check command exit status and quote the returned path.
 
-The `info` command uses the same detector and preserves its existing keybox
-status fields. It adds `backend` (the selected target or null), `backends`,
-and optional `backend_error`. With no backend, its path is empty and exists is
-false. Explicit `info <keybox>` inspection remains supported;
+The `info` command uses the same detector and reports keybox status,
+`backend` (the selected target or null), `backends`, and optional `backend_error`.
+With no backend, its path is empty and exists is false. Explicit `info <keybox>`
+inspection is supported;
 `--root <sysroot>` enables isolated host fixtures.
 
 ## Installation and reload
 
 Every target describes `install_mode: "atomic-replace"`,
-`new_file_mode: "0644"` and `reload: "backend-managed"`. Duck's installer
-backs up an existing keybox and replaces it through a temporary sibling,
-preserving existing metadata. No adapter in its keybox-install path starts,
-kills or restarts a service. The action integration is responsible for
-validation before publication, metadata preservation, backup and failure
-cleanup, and must recheck path safety and active state immediately before a
-write. Read-only detection cannot eliminate a subsequent filesystem race.
+`new_file_mode: "0644"` and `reload: "backend-managed"`. `action.sh` validates
+the keybox, backs up an existing file and replaces it through a temporary sibling,
+preserving existing ownership and mode. It removes staging files on failure and
+rechecks path safety and active state before replacement.
 
-The reload field describes the absence of an installer-triggered restart.
-Hot reload behavior, Android ownership, SELinux access and live daemon loading
-remain device verification tasks. OhMyKeymint has restart requirements for
-certain *policy* changes; this package only selects its keybox and does not
-edit those policies.
+The reload field means that installation does not start, kill or restart a service,
+matching Duck's keybox installer.
 
 Regression tests use temporary sysroots and synthetic XML only:
 
