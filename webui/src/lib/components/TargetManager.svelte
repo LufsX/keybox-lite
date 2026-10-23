@@ -1,13 +1,15 @@
 <script lang="ts">
   import { onDestroy, untrack } from "svelte"
-  import { Search, KeyRound, ChevronRight, NotebookPen, Undo2, PackagePlus, RefreshCw, ListPlus, SlidersHorizontal, SquareDashed, CheckCheck, Settings2 } from "lucide-svelte"
+  import { Search, KeyRound, ChevronRight, ChevronDown, NotebookPen, Undo2, PackagePlus, RefreshCw, ListPlus, SlidersHorizontal, SquareDashed, CheckCheck, Settings2 } from "lucide-svelte"
   import { packagesInfo } from "../apps"
   import AppRow from "./AppRow.svelte"
+  import AppListSkeleton from "./AppListSkeleton.svelte"
   import Modal from "./Modal.svelte"
   import VirtualList from "./VirtualList.svelte"
   import { exec, type ExecResult } from "../bridge"
   import { messages, type Locale } from "../i18n"
   import { ui } from "../ui"
+  import { surface, reveal, pageExit } from "../motion"
   import {
     modes, policyKeys, validPackage, validDraft, validPolicy, validPolicyValue, parseTargetStatus, parseTargetAck,
     draftFromStatus, targetStatusCommand, targetSaveCommand, targetEntryCommand, visiblePackages,
@@ -19,9 +21,11 @@
   let status = $state<TargetStatus | null>(null)
   let draft = $state<TargetDraft | null>(null)
   let baseline = $state("")
+  let initialSelection = $state<ReadonlySet<string> | null>(null)
   let ready = $state(false)
   let entryReady = $state(false)
   let pending = $state(false)
+  let catalogReady = $state(false)
   let error = $state("")
   let notice = $state("")
   let query = $state("")
@@ -30,6 +34,9 @@
   let manualMode = $state<TargetMode>("auto")
   let editor = $state<{ name: string; mode: TargetMode; policy: Policy; tracked: boolean } | null>(null)
   let editorBaseline = ""
+  let advancedOpen = $state(false)
+  const componentId = $props.id()
+  const advancedId = componentId + "-advanced"
   let menuOpen = $state(false)
   let menuElement = $state<HTMLDivElement>()
   let sheet = $state<"system" | "global" | "manual" | "entry" | null>(null)
@@ -39,17 +46,11 @@
   let globalBaseline = ""
   let systemDraft = $state<string[]>([])
   let systemBaseline = ""
-  let systemOrder = $state<string[]>([])
   let metadata = $state<Map<string, { label: string; icon: string | null }>>(new Map())
   let metadataSequence = 0
   let metadataNames = $derived(status ? [...new Set([...status.packages.map(item => item.package_name), ...(draft?.targets.map(item => item.package_name) ?? [])])].sort().join("\n") : "")
-  let systemRows = $derived(orderedSystemRows())
-  function orderedSystemRows() {
-    if (!status || !draft) return []
-    const order = new Map(systemOrder.map((name, index) => [name, index]))
-    return visiblePackages(status, draft, systemQuery, "system", metadata)
-      .sort((a, b) => (order.get(a.package_name) ?? 0) - (order.get(b.package_name) ?? 0))
-  }
+  let systemSelection = $state<ReadonlySet<string>>(new Set())
+  let systemRows = $derived(status && draft ? visiblePackages(status, draft, systemQuery, "system", metadata, systemSelection) : [])
   let fabCollapsed = $state(false)
   let previousScroll = 0
   let scrollDirection = 0
@@ -61,7 +62,7 @@
   let locked = $derived(disabled || pending || !bin)
   let editable = $derived(!locked && ready && !!status?.supported && !!status?.backend?.active)
   let dirty = $derived(!!draft && JSON.stringify(draft) !== baseline)
-  let visible = $derived(status && draft ? visiblePackages(status, draft, query, filter, metadata) : [])
+  let visible = $derived(status && draft ? visiblePackages(status, draft, query, filter, metadata, initialSelection ?? undefined) : [])
   const inputClass = "min-h-8 min-w-0 rounded-lg border border-[var(--line)] bg-[var(--inset)] px-2 py-1 text-xs text-[var(--text)] disabled:opacity-50"
 
   $effect(() => {
@@ -75,6 +76,9 @@
       ready = false
       entryReady = false
       status = null
+      initialSelection = null
+      catalogReady = false
+      metadata = new Map()
       draft = null
       baseline = ""
       error = ""
@@ -108,7 +112,10 @@
       if (!disposed && !controller.signal.aborted && id === metadataSequence && bin === path && !disabled) metadata = value
     }).catch(() => {
       if (!disposed && id === metadataSequence && bin === path) metadata = new Map()
-    }).finally(() => { clearTimeout(timer) })
+    }).finally(() => {
+      clearTimeout(timer)
+      if (!disposed && id === metadataSequence && bin === path && !disabled) catalogReady = true
+    })
     return () => { controller.abort(); clearTimeout(timer); if (id === metadataSequence) metadataSequence++ }
   }
   $effect(() => { onMenuChange?.(menuOpen) })
@@ -164,17 +171,8 @@
     closeMenu(true)
     if (action === "refresh") void refresh()
     else if (action === "select") selectVisible(true)
-    else if (action === "clear") {
-      if (!status || !draft) return
-      if (query.trim()) selectVisible(false)
-      else {
-        const names = new Set(draft.targets.map(item => item.package_name))
-        draft.targets = []
-        draft.system_apps = draft.system_apps.filter(name => !names.has(name))
-        for (const name of names) delete draft.per_app_policy[name]
-        notice = ""
-      }
-    } else if (action === "auto") autoAdd(!draft?.auto_add_new_apps)
+    else if (action === "clear") selectVisible(false)
+    else if (action === "auto") autoAdd(!draft?.auto_add_new_apps)
     else if (["system", "global", "manual", "entry"].includes(action)) openSheet(action as NonNullable<typeof sheet>)
   }
   function openSheet(value: NonNullable<typeof sheet>) {
@@ -182,10 +180,8 @@
     if (value === "system" && draft && status) {
       systemQuery = ""
       systemDraft = [...draft.system_apps]
+      systemSelection = new Set(systemDraft)
       systemBaseline = JSON.stringify(systemDraft)
-      const tracked = new Set(systemDraft)
-      systemOrder = visiblePackages(status, draft, "", "system").sort((a, b) =>
-        Number(tracked.has(b.package_name)) - Number(tracked.has(a.package_name)) || a.package_name.localeCompare(b.package_name)).map(item => item.package_name)
     }
     if (value === "global" && draft) {
       globalPolicy = { ...draft.default_policy }
@@ -274,6 +270,7 @@
     if (!canEdit() || !draft) return
     const target = draft.targets.find(item => item.package_name === name)
     if (!target) return
+    advancedOpen = false
     editor = { name, mode: target.mode, policy: { ...(draft.per_app_policy[name] ?? {}) }, tracked: draft.system_apps.includes(name) }
     editorBaseline = JSON.stringify(editor)
   }
@@ -313,12 +310,14 @@
   }
   function accept(value: TargetStatus) {
     status = value
+    if (!value.packages.length && !value.config.targets.length) catalogReady = true
     entryReady = true
     ready = !value.config_error && !value.packages_error
     if (!ready) {
       error = [value.config_error, value.packages_error].filter(Boolean).join("\n")
       return
     }
+    if (initialSelection === null) initialSelection = new Set(value.config.targets.map(item => item.package_name))
     draft = draftFromStatus(value)
     if (value.backend?.backend !== "tricky-store") draft.per_app_policy = {}
     baseline = JSON.stringify(draft)
@@ -350,34 +349,30 @@
   }
   function select(name: string, enabled: boolean) {
     if (!canEdit() || !draft) return
+    if (canTrackSystem(name) && !draft.system_apps.includes(name)) draft.system_apps.push(name)
     if (enabled) {
       if (!draft.targets.some(item => item.package_name === name)) {
         draft.targets.push({ package_name: name, mode: status?.packages.find(item => item.package_name === name)?.mode ?? "auto" })
-        if (canTrackSystem(name) && !draft.system_apps.includes(name))
-          draft.system_apps.push(name)
       }
     } else {
       draft.targets = draft.targets.filter(item => item.package_name !== name)
-      // Remove dependent overrides and tracking only for explicitly removed targets.
       delete draft.per_app_policy[name]
-      draft.system_apps = draft.system_apps.filter(item => item !== name)
     }
     notice = ""
   }
   function selectVisible(enabled: boolean) {
     if (!status || !draft) return
-    const scope = visiblePackages(status, draft, query, filter, metadata)
+    const scope = visiblePackages(status, draft, query, filter, metadata, initialSelection ?? undefined)
     const selected = new Map(draft.targets.map(item => [item.package_name, item]))
     const tracked = new Set(draft.system_apps)
     for (const item of scope) {
+      if (item.system && !item.package_name.startsWith("uid:")) tracked.add(item.package_name)
       if (enabled) {
         if (!selected.has(item.package_name)) {
           selected.set(item.package_name, { package_name: item.package_name, mode: item.mode })
-          if (item.system && !item.package_name.startsWith("uid:")) tracked.add(item.package_name)
         }
       } else {
         selected.delete(item.package_name)
-        tracked.delete(item.package_name)
         delete draft.per_app_policy[item.package_name]
       }
     }
@@ -485,11 +480,11 @@
 
 <svelte:window onbeforeunload={beforeUnload} onpointerdown={dismissMenu} onfocusin={dismissMenu} onkeydown={menuKeydown} {onscroll} />
 
-<div class="page-enter target-page relative min-w-0 text-xs" aria-busy={pending}>
+<div class="page-enter target-page relative min-w-0 text-xs" aria-busy={pending} out:pageExit|global>
   <h1 use:trackTitle class="mb-3 text-xl font-[650] leading-[1.35] tracking-[-.6px] max-[359px]:text-lg">Tricky Store</h1>
   {#if menuOpen}
     <div bind:this={menuElement} id="targets-menu" role="menu" aria-label={m.targetsMore}
-      class="target-menu fixed z-50 grid w-64 overflow-y-auto">
+      class="target-menu fixed z-50 grid w-64 overflow-y-auto" transition:surface>
       {#each [
         { value: "select", label: m.targetsSelectVisible, icon: CheckCheck, blocked: !editable },
         { value: "clear", label: m.targetsClearVisible, icon: SquareDashed, blocked: !editable },
@@ -552,23 +547,10 @@
           <span class="skeleton-block ml-auto h-2.5 w-12"></span>
         </div>
       </div>
-      <div aria-hidden="true" data-skeleton="apps">
-        {#each [1, 2, 3, 4, 5, 6, 7, 8] as placeholder}
-          <div class="pb-1">
-            <div class="flex min-h-16 items-center gap-1 rounded-[10px] bg-[var(--panel)] px-2 py-2">
-              <div class="flex min-w-0 flex-1 items-center gap-2">
-                <span class="skeleton-block size-9 shrink-0 !rounded-full"></span>
-                <span class="grid min-w-0 flex-1 gap-2"><span class="skeleton-block h-3 w-1/2"></span><span class="skeleton-block h-2.5 w-3/4"></span></span>
-              </div>
-              <span class="size-8 shrink-0"></span>
-              <span class="check-hit"><span class="skeleton-block size-[18px] !rounded-[5px]"></span></span>
-            </div>
-          </div>
-        {/each}
-      </div>
+      <AppListSkeleton />
     {/if}
     {#if error}<p role="alert" class="whitespace-pre-wrap text-[var(--red)] [overflow-wrap:anywhere]">{error}</p>{/if}
-    {#if notice && !sheet && !editor}<p role="status" class="target-notice">{notice}</p>{/if}
+    {#if notice && !sheet && !editor}<p role="status" class="target-notice" transition:surface>{notice}</p>{/if}
     {#if status && !status.supported}<p>{m.targetsUnsupported}</p>{/if}
     {#if status?.supported && draft}
       <div class="target-search">
@@ -579,28 +561,34 @@
         <span class="shrink-0 text-[11px] tabular-nums text-[var(--muted)]" aria-live="polite">{m.targetsSelected} {draft.targets.length}</span>
       </div>
       </div>
+      {#if catalogReady}
         <VirtualList items={visible} getKey={(item) => item.package_name} estimateSize={68}>
           {#snippet item(app)}
             <div class="pb-1">
               <AppRow packageName={app.package_name} label={metadata.get(app.package_name)?.label || app.package_name}
                 icon={metadata.get(app.package_name)?.icon ?? null} selected={app.selected} mode={app.mode} modeLabel={modeLabel(app.mode)}
-                system={app.system} systemLabel={m.targetsSystem} customPolicy={!!draft.per_app_policy[app.package_name]}
+                system={app.system} systemLabel={m.targetsSystem} customPolicy={!!draft?.per_app_policy[app.package_name]}
                 policyLabel={m.targetsAppPolicy} missing={!app.installed} missingLabel={m.targetsMissing} editLabel={m.targetsEdit}
                 disabled={!editable} ontoggle={() => select(app.package_name, !app.selected)} ontune={() => openEditor(app.package_name)} />
             </div>
           {/snippet}
         </VirtualList>
-      {#if !visible.length}<p class="page-enter py-4 text-center text-[var(--muted)]">{m.targetsEmpty}</p>{/if}
+      {:else}
+        <AppListSkeleton />
+      {/if}
+      {#if catalogReady && !visible.length}<p class="page-enter py-4 text-center text-[var(--muted)]">{m.targetsEmpty}</p>{/if}
       <div class="target-fab-bar">
-        <div class="pointer-events-auto flex justify-end gap-2">
+        <div class="pointer-events-auto flex items-end justify-end">
           {#if dirty}
+            <div class="target-fab-item" transition:reveal>
             <button type="button" class="target-fab target-fab-secondary" class:is-collapsed={fabCollapsed}
               disabled={!editable || !!editor || !!sheet} aria-label={m.targetsDiscardAction} onclick={discard}><Undo2 size={18} /><span class="target-fab-label" aria-hidden="true">{m.targetsDiscardAction}</span></button>
+            </div>
           {/if}
-          <button type="button" class="target-fab target-fab-primary" class:is-collapsed={fabCollapsed}
+          <button type="button" class="target-fab target-fab-primary" class:is-collapsed={fabCollapsed} transition:surface={{ y: 6, scale: .96 }}
             disabled={!editable || !dirty || !validDraft(draft) || !!editor || !!sheet} aria-label={m.targetsSave} onclick={save}>
             <NotebookPen size={18} /><span aria-hidden="true" class="target-fab-label">{m.targetsSave}</span>
-            {#if dirty}<span class="target-fab-dot" aria-label={m.targetsUnsaved}></span>{/if}
+            {#if dirty}<span class="target-fab-dot" aria-label={m.targetsUnsaved} transition:surface={{ y: 0, scale: .5, duration: 140 }}></span>{/if}
           </button>
         </div>
       </div>
@@ -681,8 +669,13 @@
       {/each}
     </fieldset>
     {#if supportsAppPolicy() || canTrackSystem(editor.name)}
-      <details class="mt-3 rounded-[10px] border border-[var(--line)]">
-        <summary class="cursor-pointer px-2 py-2 font-medium">{m.targetsSettings}</summary>
+      <div class="mt-3 rounded-[10px] border border-[var(--line)]">
+        <button type="button" class="flex min-h-10 w-full items-center justify-between gap-2 px-2 py-2 text-left font-medium"
+          aria-expanded={advancedOpen} aria-controls={advancedId} onclick={() => advancedOpen = !advancedOpen}>
+          {m.targetsSettings}<ChevronDown size={16} class={"text-[var(--muted)] transition-transform duration-200 " + (advancedOpen ? "rotate-180" : "")} />
+        </button>
+        <div id={advancedId} class={"grid transition-[grid-template-rows,opacity] duration-200 " + (advancedOpen ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0")} inert={!advancedOpen}>
+        <div class="min-h-0 overflow-hidden">
         <fieldset disabled={!editable} class="grid gap-2 px-2 pb-2">
           {#if canTrackSystem(editor.name)}
             <label class="flex min-h-8 items-center gap-2"><input type="checkbox" bind:checked={editor.tracked} class="ui-check" />{m.targetsTrackSystem}</label>
@@ -693,13 +686,15 @@
             <p class="text-[11px] leading-relaxed text-[var(--muted)]">{m.targetsPolicyHint}</p>
           {/if}
         </fieldset>
-      </details>
+        </div>
+        </div>
+      </div>
     {/if}
     {#snippet footer(requestClose)}
       <button type="button" class="{ui.button} min-w-[88px] border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]"
         disabled={pending} onclick={requestClose}>{m.targetsCancel}</button>
       <button type="button" class="{ui.button} min-w-[88px] bg-[var(--accent)] text-[var(--accent-ink)]"
-        disabled={!editable || !validPolicy(editor.policy)} onclick={() => { applyEditor(false); requestClose() }}>{m.targetsApply}</button>
+        disabled={!editable || !editor || !validPolicy(editor.policy)} onclick={() => { applyEditor(false); requestClose() }}>{m.targetsApply}</button>
     {/snippet}
   </Modal>
 {/if}
