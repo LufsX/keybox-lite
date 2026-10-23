@@ -20,6 +20,7 @@ import (
 	"keyboxlite/internal/targets"
 	"keyboxlite/internal/updatejob"
 	"keyboxlite/internal/verify"
+	"keyboxlite/internal/webentry"
 )
 
 func main() {
@@ -27,6 +28,8 @@ func main() {
 		usage()
 	}
 	switch os.Args[1] {
+	case "open-webui":
+		os.Exit(webentry.Run(os.Args[2:]))
 	case "targets":
 		os.Exit(targets.Run(os.Args[2:]))
 	case "update", "settings", "service", "maintenance", "uninstall":
@@ -155,7 +158,7 @@ func read(args []string, n int, msg string) ([]byte, error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: keyboxlite targets|update|settings|service|maintenance|uninstall|run-update|cancel-update|backend|prepare|decode-meow|decode-spectre|decode-addon|spectre-url|spectre-urls|serials|check|info|verify ...")
+	fmt.Fprintln(os.Stderr, "usage: keyboxlite open-webui|targets|update|settings|service|maintenance|uninstall|run-update|cancel-update|backend|prepare|decode-meow|decode-spectre|decode-addon|spectre-url|spectre-urls|serials|check|info|verify ...")
 	os.Exit(2)
 }
 

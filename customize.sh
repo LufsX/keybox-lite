@@ -12,10 +12,10 @@ else
     ui_print "- Root manager: Magisk $MAGISK_VER"
 fi
 
-for kbl_file in action.sh settings.sh service.sh uninstall.sh sources.sh bin/keyboxlite; do
+for kbl_file in action.sh settings.sh service.sh uninstall.sh webui.sh bin/keyboxlite; do
     [ -f "$MODPATH/$kbl_file" ] || abort "! Missing $kbl_file"
 done
-for kbl_file in action.sh settings.sh service.sh uninstall.sh bin/keyboxlite; do
+for kbl_file in action.sh settings.sh service.sh uninstall.sh webui.sh bin/keyboxlite; do
     set_perm "$MODPATH/$kbl_file" 0 0 0755 || abort "! Cannot set permissions: $kbl_file"
 done
 # uninstall leaves this marker to block late writers; reinstall enables runtime.
