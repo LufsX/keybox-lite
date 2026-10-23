@@ -1,6 +1,5 @@
 // Package targets manages Tricky Store targets and optional backend WebUI entries.
-// The config formats and auto-target behavior follow Duck-ToolBox (MIT); see
-// LICENSES/Duck-ToolBox.txt.
+// The config formats and auto-target behavior follow Duck-ToolBox (MIT).
 package targets
 
 import (

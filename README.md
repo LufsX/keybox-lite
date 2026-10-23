@@ -34,7 +34,6 @@ A KernelSU / APatch / Magisk module that updates the Tricky Store / TEESimulator
     module.prop
     bin/keyboxlite Go binary (built, not tracked)
     src/           Go source (backend, targets, runtime, decoding and certificate checks)
-    LICENSES/      third-party source attribution and license
     webui/         Svelte 5 + Tailwind v4 + TS + lucide-svelte WebUI
     webroot/       WebUI build output (bundled into the zip)
     META-INF/      module installer
@@ -113,9 +112,8 @@ selects direct and built-in GitHub routes.
 Empty responses are rejected. Integration tests use generated data and mock downloads.
 Duck’s manual repository browser requires interactive selection/download tokens and CAPTCHA.
 
-Duck ToolBox source attribution, reference revision and MIT license are retained in
-[LICENSES/Duck-ToolBox.txt](LICENSES/Duck-ToolBox.txt). Duck ToolBox's Tricky Store
-manager originates from KOWX712's [Tricky Addon: Update Target List](https://github.com/KOWX712/Tricky-Addon-Update-Target-List)
+Target management follows [Duck ToolBox](https://github.com/eltavine/Duck-ToolBox),
+whose Tricky Store manager originates from KOWX712's [Tricky Addon: Update Target List](https://github.com/KOWX712/Tricky-Addon-Update-Target-List)
 (Apache-2.0).
 
 Build dependencies are Go, Node.js/npm and zip. UPX compression is optional;
