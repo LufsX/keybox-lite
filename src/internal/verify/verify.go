@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	live   = "https://android.googleapis.com/attestation/status"
+	live = "https://android.googleapis.com/attestation/status"
+	// Legacy endpoint identifier; it is not an eligible request target.
 	mirror = "https://raw.githubusercontent.com/purainity/keybox-tools/main/res/status.json"
 )
 
@@ -124,15 +125,12 @@ func Run(args []string) int {
 	download, ok := fetchStatus(context.Background(), dir, accel)
 	if !ok {
 		termfmt.Println("[FAIL] current Google status unavailable")
+		termfmt.Println("RESULT: unknown")
 		return 2
 	}
-	switch {
-	case download.stale:
-		termfmt.Printf("[CHECK] status: mirror (%s)\n", download.url)
-		termfmt.Println("[WARN] stale mirror: newer revocations may be missing")
-	case download.cached:
+	if download.cached {
 		termfmt.Printf("[CACHE] status: cache hit (<60s, %s)\n", download.url)
-	default:
+	} else {
 		termfmt.Printf("[CHECK] status: live (%s)\n", download.url)
 	}
 
@@ -147,11 +145,6 @@ func Run(args []string) int {
 		}
 		termfmt.Println("RESULT: revoked")
 		return 1
-	}
-	if download.stale {
-		termfmt.Println("[WARN] current revocation status unavailable for these certificates")
-		termfmt.Println("RESULT: unknown (serial absent from stale mirror; current revocation status unavailable)")
-		return 2
 	}
 	termfmt.Printf("[OK] revocation: %d certs checked, none revoked\n", len(serials))
 	termfmt.Println("RESULT: not revoked")

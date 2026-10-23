@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,7 +30,7 @@ type downloader struct {
 type statusDownload struct {
 	raw    []byte
 	url    string
-	stale  bool
+	stale  bool // Legacy marker: reject old snapshot results when caching.
 	cached bool
 }
 
@@ -69,17 +70,22 @@ func downloaders() []downloader {
 }
 
 func statusURLs(accel, target string) []string {
+	if target != live {
+		return nil
+	}
 	urls := []string{target}
 	seen := map[string]bool{target: true}
 	for _, prefix := range strings.Fields(accel) {
 		u := prefix + target
+		// gh-proxy only supports allowlisted sources, not Google status.
+		if parsed, err := url.Parse(u); err == nil &&
+			strings.EqualFold(strings.TrimSuffix(parsed.Hostname(), "."), "gh-proxy.com") {
+			continue
+		}
 		if !seen[u] {
 			urls = append(urls, u)
 			seen[u] = true
 		}
-	}
-	if target == mirror && !seen["https://gh-proxy.com/"+mirror] {
-		urls = append(urls, "https://gh-proxy.com/"+mirror)
 	}
 	return urls
 }
@@ -192,15 +198,6 @@ func fetchStatusUncached(ctx context.Context, dir, accel string) (statusDownload
 	defer cancel()
 	tools := downloaders()
 	liveCtx, liveCancel := context.WithTimeout(ctx, liveTimeout)
-	result, ok := raceStatus(liveCtx, dir, statusURLs(accel, live), tools, maxStatusBytes)
-	liveCancel()
-	if ok {
-		return result, true
-	}
-	if ctx.Err() != nil {
-		return statusDownload{}, false
-	}
-	result, ok = raceStatus(ctx, dir, statusURLs(accel, mirror), tools, maxStatusBytes)
-	result.stale = true
-	return result, ok
+	defer liveCancel()
+	return raceStatus(liveCtx, dir, statusURLs(accel, live), tools, maxStatusBytes)
 }

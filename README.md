@@ -9,7 +9,7 @@ A KernelSU / APatch / Magisk module that updates the Tricky Store / TEESimulator
   before accepting it.
 - **Decoding / ASN.1 / revocation check** run in a Go binary (`bin/keyboxlite`, static arm64).
   Semantics: base64 x10 + hex + ROT13, shuffled base64, X.509 serial extraction, Google
-  attestation status matching (live, then a stale GitHub mirror).
+  attestation status matching against the official Google list, racing direct access and the configured proxy.
 - **Runtime** runs in Go: source selection, downloads, preparation, verification, backed-up
   installation, settings, scheduling and cleanup. Downloads use curl/wget through `os/exec`.
 - **Install** runs entirely within Keybox Lite. Duck ToolBox is not required and
@@ -169,5 +169,6 @@ does not change the existing installation policy.
 (Unix seconds), and `status`. `check` / `verify` return 0 on success, 1 for revocation,
 2 when checking fails, and 3 for certificates outside their validity period.
 Certificate serials exposed by the CLI/JSON remain decimal; revocation matching converts
-them to Google’s hexadecimal status-list keys. A stale mirror can confirm a listed
-revocation, but absence from that mirror returns unknown (exit 2), never “not revoked”.
+them to Google’s hexadecimal status-list keys. Official direct and proxy requests race;
+the first valid response wins. Only official results are cached for up to 60 seconds.
+If no official response is available, verification returns unknown (exit 2).

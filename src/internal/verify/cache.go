@@ -218,8 +218,8 @@ func readStatusCache(dir *os.File, name, accel string, now time.Time) (statusDow
 }
 
 func writeStatusCache(dir *os.File, name string, result statusDownload) error {
-	if result.stale {
-		return errors.New("cannot cache stale mirror")
+	if result.stale || !strings.HasSuffix(result.url, live) {
+		return errors.New("cannot cache unofficial status source")
 	}
 	if _, err := status.Check(result.raw, nil); err != nil {
 		return err
@@ -292,7 +292,7 @@ func fetchStatus(ctx context.Context, workdir, accel string) (statusDownload, bo
 		return withoutCache("remove old record", err)
 	}
 	result, ok = fetchStatusUncached(ctx, workdir, accel)
-	if ok && !result.stale {
+	if ok {
 		if err := writeStatusCache(dir, name, result); err != nil {
 			termfmt.Printf("[CACHE] unavailable (write: %s); live result not cached\n", cacheErrorReason(err))
 		}
