@@ -12,7 +12,7 @@ VERSION=$(sed -n 's/^version=//p' module.prop)
 case "$VERSION" in
     ""|*[!A-Za-z0-9._-]*) echo "invalid module version" >&2; exit 1 ;;
 esac
-VERSION_CODE=$(date '+%Y%m%d%H%M')
+VERSION_CODE=${VERSION_CODE:-$(date '+%Y%m%d%H%M')}
 mkdir -p dist
 OUT="dist/keybox-lite-$VERSION.zip"
 STAGE=$(mktemp -d)
@@ -20,7 +20,16 @@ trap 'rm -rf "$STAGE"' EXIT
 trap 'exit 1' HUP INT TERM
 mkdir -p "$STAGE/bin"
 cp module.prop action.sh settings.sh service.sh customize.sh uninstall.sh webui.sh icon.png "$STAGE/"
-sed "s/^versionCode=.*/versionCode=$VERSION_CODE/" module.prop > "$STAGE/module.prop"
+# versionCode is generated per package; module.prop intentionally has none.
+{
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            versionCode=*) ;;
+            version=*) printf '%s\n' "$line" "versionCode=$VERSION_CODE" ;;
+            *) printf '%s\n' "$line" ;;
+        esac
+    done < module.prop
+} > "$STAGE/module.prop"
 cp -R META-INF webroot "$STAGE/"
 # The module manager uses the root PNG; the WebUI uses icon.svg.
 rm -f "$STAGE/webroot/icon.png"
