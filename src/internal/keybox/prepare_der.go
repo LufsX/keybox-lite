@@ -99,46 +99,45 @@ func prepareCurve(oid []byte) int {
 }
 
 func preparePrivate(text []byte, algorithm string) bool {
-	for _, kind := range []string{"PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"} {
-		der, ok := preparePEM(text, kind)
-		if !ok {
-			continue
-		}
-		body, ok := prepareSequence(der)
-		if !ok {
+	block := singlePEM(text)
+	if block == nil {
+		return false
+	}
+	body, ok := prepareSequence(block.Bytes)
+	if !ok {
+		return false
+	}
+	switch block.Type {
+	case "RSA PRIVATE KEY":
+		return algorithm == "rsa" && prepareRSA(body, true)
+	case "EC PRIVATE KEY":
+		return algorithm == "ec" && prepareEC(body, 0)
+	case "PRIVATE KEY": // unencrypted PKCS#8 PrivateKeyInfo
+		r := prepareDER{data: body}
+		version, valid := prepareInteger(&r, true)
+		if !valid || !bytes.Equal(version, []byte{0}) {
 			return false
 		}
-		switch kind {
-		case "RSA PRIVATE KEY":
-			return algorithm == "rsa" && prepareRSA(body, true)
-		case "EC PRIVATE KEY":
-			return algorithm == "ec" && prepareEC(body, 0)
-		default: // unencrypted PKCS#8 PrivateKeyInfo
-			r := prepareDER{data: body}
-			version, valid := prepareInteger(&r, true)
-			if !valid || !bytes.Equal(version, []byte{0}) {
-				return false
-			}
-			identifier, valid := r.take(0x30)
-			algo, width, supported := prepareAlgorithm(identifier)
-			if !valid || !supported || algo != algorithm {
-				return false
-			}
-			inner, valid := r.take(4)
-			if !valid || !r.done() {
-				return false
-			}
-			innerBody, valid := prepareSequence(inner)
-			if !valid {
-				return false
-			}
-			if algo == "rsa" {
-				return prepareRSA(innerBody, true)
-			}
-			return prepareEC(innerBody, width)
+		identifier, valid := r.take(0x30)
+		algo, width, supported := prepareAlgorithm(identifier)
+		if !valid || !supported || algo != algorithm {
+			return false
 		}
+		inner, valid := r.take(4)
+		if !valid || !r.done() {
+			return false
+		}
+		innerBody, valid := prepareSequence(inner)
+		if !valid {
+			return false
+		}
+		if algo == "rsa" {
+			return prepareRSA(innerBody, true)
+		}
+		return prepareEC(innerBody, width)
+	default:
+		return false
 	}
-	return false
 }
 
 func prepareRSA(body []byte, private bool) bool {
