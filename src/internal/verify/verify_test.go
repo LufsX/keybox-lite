@@ -57,8 +57,7 @@ func TestRunDownloadFallbackAndCleanup(t *testing.T) {
 		{"skip invalid accelerated response", "fallback", 1},
 		{"all responses invalid", "invalid", 2},
 		{"valid list without matches", "clean", 0},
-		{"stale mirror without match is unknown", "mirrorclean", 2},
-		{"stale mirror positive match is revoked", "mirrorrevoked", 1},
+		{"revoked official response", "revoked", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -80,8 +79,8 @@ while [ "$#" -gt 0 ]; do
 done
 printf '%s\n' "$url" >> "$FAKE_LOG"
 case "$FAKE_MODE:$url" in
-    invalid:*|fallback:https://accel.invalid/*|mirrorclean:*attestation/status|mirrorrevoked:*attestation/status) printf '%s' '{"entries":null}' > "$out" ;;
-    clean:*|mirrorclean:*) printf '%s' '{"entries":{}}' > "$out" ;;
+    invalid:*|fallback:https://accel.invalid/*) printf '%s' '{"entries":null}' > "$out" ;;
+    clean:*) printf '%s' '{"entries":{}}' > "$out" ;;
     *) printf '%s' '{"entries":{"2a":{"status":"REVOKED","reason":"KEY_COMPROMISE"}}}' > "$out" ;;
 esac
 `
@@ -109,8 +108,16 @@ esac
 			if tc.mode == "fallback" && !strings.Contains(string(requests), live+"\n") {
 				t.Fatalf("did not retry direct status after malformed response: %s", requests)
 			}
-			if tc.mode == "invalid" && len(strings.Fields(string(requests))) != len(statusURLs("https://accel.invalid/", live))+len(statusURLs("https://accel.invalid/", mirror)) {
-				t.Fatalf("did not exhaust candidates: %s", requests)
+			// Only the direct official URL and its accelerated copy are eligible.
+			// Every failing candidate is attempted, so the request count is exact.
+			if tc.mode == "invalid" {
+				want := len(downloaders()) * len(statusURLs("https://accel.invalid/", live))
+				if got := len(strings.Fields(string(requests))); got != want {
+					t.Fatalf("requests = %d, want %d: %s", got, want, requests)
+				}
+			}
+			if strings.Contains(string(requests), "raw.githubusercontent.com") {
+				t.Fatalf("legacy mirror URL requested: %s", requests)
 			}
 			if data, err := os.ReadFile(legacy); err != nil || string(data) != "do not touch" {
 				t.Fatalf("overwrote shared temporary file: %q, %v", data, err)

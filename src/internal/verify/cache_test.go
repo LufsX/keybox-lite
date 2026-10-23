@@ -27,19 +27,13 @@ func TestCacheNetworkProcess(t *testing.T) {
 	fmt.Fprintln(log, os.Getpid())
 	log.Close()
 	time.Sleep(100 * time.Millisecond)
-	url := os.Args[len(os.Args)-1]
 	mode := os.Getenv("VERIFY_CACHE_MODE")
-	if strings.HasPrefix(mode, "mirror") && strings.HasSuffix(url, "/attestation/status") {
-		os.Exit(1)
-	}
 	switch mode {
 	case "invalid":
 		fmt.Print(`{"entries":null}`)
 	case "failed":
 		fmt.Print(`{"entries":{}}`)
 		os.Exit(1)
-	case "mirrorclean":
-		fmt.Print(`{"entries":{}}`)
 	case "blocked":
 		time.Sleep(10 * time.Second)
 	default:
@@ -265,27 +259,27 @@ func TestCacheInvalidRecordsRefresh(t *testing.T) {
 	}
 }
 
-func TestCacheDoesNotSaveMirrorsOrFailures(t *testing.T) {
-	for _, mode := range []string{"mirrorclean", "mirrorrevoked", "invalid", "failed"} {
+func TestCacheDoesNotSaveInvalidOrFailedOfficialResponses(t *testing.T) {
+	for _, mode := range []string{"invalid", "failed"} {
 		t.Run(mode, func(t *testing.T) {
 			dir, file := cacheFixture(t)
 			t.Setenv("VERIFY_CACHE_MODE", mode)
 			path := testKeyboxSerial(t, dir, 41)
-			want := 2
-			if mode == "mirrorrevoked" {
-				path = testKeyboxSerial(t, dir, 42)
-				want = 1
-			}
-			for i := 0; i < 2; i++ {
-				if got := Run([]string{path}); got != want {
-					t.Fatalf("Run = %d, want %d", got, want)
+			// cacheFixture configures no proxy (" ") and only a curl stub, so an
+			// unusable response must not be cached and must not suppress the next
+			// official attempt: each Run issues exactly len(downloaders()) *
+			// len(statusURLs(" ", live)) requests.
+			perRun := len(downloaders()) * len(statusURLs(" ", live))
+			for i := 1; i <= 2; i++ {
+				if got := Run([]string{path}); got != 2 {
+					t.Fatalf("Run = %d, want 2", got)
 				}
 				if _, err := os.Lstat(file); !os.IsNotExist(err) {
-					t.Fatalf("non-live response cached: %v", err)
+					t.Fatalf("unusable official response cached: %v", err)
 				}
-			}
-			if requestCount(t) < 4 {
-				t.Fatal("failure/mirror suppressed subsequent live attempt")
+				if got := requestCount(t); got != perRun*i {
+					t.Fatalf("requests after run %d = %d, want %d", i, got, perRun*i)
+				}
 			}
 		})
 	}

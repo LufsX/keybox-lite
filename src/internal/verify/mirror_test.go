@@ -9,17 +9,20 @@ import (
 	"time"
 )
 
-func TestRunWaitsForLiveBeforeOldMirror(t *testing.T) {
+// The official live endpoint and its accelerated copy are the only status
+// sources. The legacy mirror URL is never requested, so the trap fallback
+// branch below must never run even while the official response is pending.
+func TestRunOfficialStatusOnlyNeverRequestsLegacyMirror(t *testing.T) {
 	sleep, err := exec.LookPath("sleep")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name, liveJSON, mirrorJSON string
-		want                       int
+		name, liveJSON, fallbackJSON string
+		want                         int
 	}{
-		{"live revocation beats clean mirror", `{"entries":{"2a":{"status":"REVOKED"}}}`, `{"entries":{}}`, 1},
-		{"live clean beats revoked mirror", `{"entries":{}}`, `{"entries":{"2a":{"status":"REVOKED"}}}`, 0},
+		{"official revocation is applied", `{"entries":{"2a":{"status":"REVOKED"}}}`, `{"entries":{}}`, 1},
+		{"clean official list is authoritative", `{"entries":{}}`, `{"entries":{"2a":{"status":"REVOKED"}}}`, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -37,8 +40,8 @@ case "$url" in
         printf '%s' "$FAKE_LIVE"
         ;;
     *)
-        printf called > "$FAKE_MIRROR_CALLED"
-        printf '%s' "$FAKE_MIRROR"
+        printf called > "$FAKE_FALLBACK_CALLED"
+        printf '%s' "$FAKE_FALLBACK"
         ;;
 esac
 `
@@ -47,16 +50,16 @@ esac
 			}
 			started := filepath.Join(dir, "started")
 			gate := filepath.Join(dir, "gate")
-			mirrorCalled := filepath.Join(dir, "mirror")
+			fallbackCalled := filepath.Join(dir, "fallback")
 			t.Setenv("PATH", bin)
 			t.Setenv("TMPDIR", dir)
 			t.Setenv("KB_ACCEL", "https://proxy.invalid/")
 			t.Setenv("FAKE_STARTED", started)
 			t.Setenv("FAKE_GATE", gate)
-			t.Setenv("FAKE_MIRROR_CALLED", mirrorCalled)
+			t.Setenv("FAKE_FALLBACK_CALLED", fallbackCalled)
 			t.Setenv("FAKE_SLEEP", sleep)
 			t.Setenv("FAKE_LIVE", tc.liveJSON)
-			t.Setenv("FAKE_MIRROR", tc.mirrorJSON)
+			t.Setenv("FAKE_FALLBACK", tc.fallbackJSON)
 			done := make(chan int, 1)
 			go func() { done <- Run([]string{keybox}) }()
 			// Always release and join before testing cleanup, even on a failed assertion.
@@ -74,13 +77,13 @@ esac
 					break
 				}
 				if time.Now().After(deadline) {
-					t.Fatal("live downloader never started")
+					t.Fatal("official downloader never started")
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
 			time.Sleep(100 * time.Millisecond)
-			if _, err := os.Stat(mirrorCalled); !os.IsNotExist(err) {
-				t.Fatalf("mirror ran while live response was pending: %v", err)
+			if _, err := os.Stat(fallbackCalled); !os.IsNotExist(err) {
+				t.Fatalf("fallback ran while official response was pending: %v", err)
 			}
 			if err := os.WriteFile(gate, nil, 0600); err != nil {
 				t.Fatal(err)
@@ -91,8 +94,8 @@ esac
 			if code != tc.want {
 				t.Fatalf("Run = %d; want %d", code, tc.want)
 			}
-			if _, err := os.Stat(mirrorCalled); !os.IsNotExist(err) {
-				t.Fatalf("mirror ran despite valid live response: %v", err)
+			if _, err := os.Stat(fallbackCalled); !os.IsNotExist(err) {
+				t.Fatalf("fallback ran despite a valid official response: %v", err)
 			}
 		})
 	}

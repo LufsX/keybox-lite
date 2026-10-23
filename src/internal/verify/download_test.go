@@ -150,3 +150,25 @@ func TestStatusURLsDeduplicate(t *testing.T) {
 		t.Fatalf("unexpected URLs: %v", urls)
 	}
 }
+
+func TestStatusURLsOfficialOnly(t *testing.T) {
+	// The legacy mirror identifier is not an eligible request target.
+	if urls := statusURLs("https://proxy/", mirror); urls != nil {
+		t.Fatalf("mirror target produced URLs: %v", urls)
+	}
+	// gh-proxy only supports allowlisted sources, so it is skipped for live.
+	urls := statusURLs("https://gh-proxy.com/", live)
+	if len(urls) != 1 || urls[0] != live {
+		t.Fatalf("gh-proxy prefix produced a request URL: %v", urls)
+	}
+	// Host matching is case-insensitive and tolerates a trailing dot.
+	urls = statusURLs("https://GH-PROXY.com./ https://proxy/", live)
+	if len(urls) != 2 || urls[0] != live || urls[1] != "https://proxy/"+live {
+		t.Fatalf("gh-proxy variant not skipped: %v", urls)
+	}
+	// A normal proxy prefix still produces the proxy URL after the direct one.
+	urls = statusURLs("https://proxy.invalid/", live)
+	if len(urls) != 2 || urls[0] != live || urls[1] != "https://proxy.invalid/"+live {
+		t.Fatalf("unexpected URLs: %v", urls)
+	}
+}

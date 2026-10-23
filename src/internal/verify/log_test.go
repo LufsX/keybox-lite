@@ -7,17 +7,21 @@ import (
 	"testing"
 )
 
-func TestMirrorLogSeverityAndPlainOutput(t *testing.T) {
+// Covers the two failure exit codes after a valid keybox: an official status
+// list that cannot be fetched (2) and an official revocation match (1). The
+// legacy mirror URL is never requested, so stale-mirror wording must be absent.
+func TestOfficialStatusUnavailableAndRevokedLogSeverityAndPlainOutput(t *testing.T) {
 	for _, tc := range []struct {
+		name       string
 		mode       string
 		wantCode   int
 		wantResult string
-		wantFail   bool
+		wantLine   string
 	}{
-		{"mirrorclean", 2, "unknown", false},
-		{"mirrorrevoked", 1, "revoked", true},
+		{"official status unavailable", "failed", 2, "RESULT: unknown", "[FAIL] current Google status unavailable"},
+		{"official status revoked", "live", 1, "RESULT: revoked", "[FAIL] REVOKED: serial 42"},
 	} {
-		t.Run(tc.mode, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			dir, _ := cacheFixture(t)
 			path := testKeyboxSerial(t, dir, 42)
 			t.Setenv("VERIFY_CACHE_MODE", tc.mode)
@@ -42,18 +46,16 @@ func TestMirrorLogSeverityAndPlainOutput(t *testing.T) {
 			}
 			out := string(raw)
 			for _, want := range []string{
-				"[WARN] stale mirror: newer revocations may be missing",
-				"RESULT: " + tc.wantResult,
+				tc.wantResult,
+				tc.wantLine,
+				"[FAIL]",
 			} {
 				if !strings.Contains(out, want) {
 					t.Errorf("missing %q in %s", want, out)
 				}
 			}
-			if strings.Contains(out, "[FAIL]") != tc.wantFail {
-				t.Errorf("incorrect failure severity: %s", out)
-			}
-			if tc.wantCode == 2 && !strings.Contains(out, "[WARN] current revocation status unavailable") {
-				t.Errorf("unknown status warning missing: %s", out)
+			if strings.Contains(out, "stale mirror") || strings.Contains(out, "mirror") {
+				t.Errorf("legacy mirror wording in output: %s", out)
 			}
 			if strings.Contains(out, "\x1b") {
 				t.Errorf("ANSI escapes in redirected output: %q", out)
