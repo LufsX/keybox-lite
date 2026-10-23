@@ -1,6 +1,6 @@
 <script lang="ts" generics="Value extends string">
   import type { Snippet } from "svelte"
-  import { fade } from "svelte/transition"
+  import { surface } from "../motion"
   import { Check } from "lucide-svelte"
   import { ui } from "../ui"
 
@@ -44,12 +44,14 @@
     {@render trigger()}
   </button>
   {#if open}
-    <div {id} class={ui.menu + " max-h-[min(320px,60dvh)] overflow-y-auto overscroll-contain"} role="group" aria-label={label} in:fade={{ duration: reducedMotion ? 0 : 140 }}>
+    <div {id} class={ui.menu + " max-h-[min(320px,60dvh)] overflow-y-auto overscroll-contain"} role="group" aria-label={label} transition:surface={{ duration: reducedMotion ? 0 : 160 }}>
       {#each options as option}
         <button class={ui.menuItem + (selected === option.value ? " " + ui.menuItemActive : "")} onclick={() => select(option.value)} aria-pressed={selected === option.value}>
           {#if optionIcon}{@render optionIcon(option.value)}{/if}
           <span lang={option.lang}>{option.label}</span>
-          {#if selected === option.value}<Check size={14} />{/if}
+          <span class="grid size-[14px] !flex-none place-items-center">
+            {#if selected === option.value}<span class="grid" transition:surface={{ y: 0 }}><Check size={14} /></span>{/if}
+          </span>
         </button>
       {/each}
     </div>

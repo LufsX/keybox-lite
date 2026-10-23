@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte"
+  import { onMount, tick } from "svelte"
+  import { pageExit } from "./lib/motion"
   import { fade } from "svelte/transition"
   import {
     RefreshCw, Loader2, ShieldCheck, ShieldAlert, ShieldQuestion,
@@ -29,7 +30,10 @@
       window.location.hash = "/targets"
       return
     }
-    targetsPage = next
+    if (targetsPage !== next) {
+      targetsPage = next
+      void tick().then(() => window.scrollTo({ top: 0, behavior: "instant" }))
+    }
     themeOpen = false
     languageOpen = false
   }
@@ -38,6 +42,7 @@
     if (targetManager && !targetManager.canLeave()) return
     targetsPage = false
     window.location.hash = "/"
+    void tick().then(() => window.scrollTo({ top: 0, behavior: "instant" }))
   }
 
   const MODULE_ID = "keybox-lite"
@@ -520,7 +525,7 @@
     {#if targetsPage}
       <TargetManager {bin} {lang} disabled={busy !== null || !moddir} bind:this={targetManager} onMenuChange={(open) => targetMenuOpen = open} onTitleVisibility={(visible) => targetTitleVisible = visible} />
     {:else}
-    <div class="page-enter">
+    <div class="page-enter" out:pageExit>
     <section class="{ui.panel} relative" aria-busy={!initialDone || busy === "refresh"}>
       <div class="{ui.heading}">
         <h2 class={ui.headingTitle}><HardDrive size={17} />{m.installed}</h2>

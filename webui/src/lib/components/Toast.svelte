@@ -19,7 +19,7 @@
     return () => clearTimeout(timer)
   })
 
-  function motion() {
+  function motion(_node: HTMLElement) {
     return {
       duration: !active || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 160,
       easing: cubicOut,

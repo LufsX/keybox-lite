@@ -43,10 +43,6 @@ svg { flex-shrink: 0; }
   from { opacity: 0; }
   to { opacity: 1; }
 }
-@keyframes surface-appear {
-  from { opacity: 0; transform: translateY(4px) scale(.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
 .page-enter { animation: page-appear 180ms ease-out; }
 .target-page { padding-bottom: calc(44px + var(--page-gutter) + env(safe-area-inset-bottom)); }
 .target-toolbar {
@@ -90,7 +86,6 @@ svg { flex-shrink: 0; }
   max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - var(--toolbar-top) - var(--toolbar-height) - 16px);
   overscroll-behavior: contain;
   transform-origin: top right;
-  animation: surface-appear 150ms ease-out;
 }
 .target-fab-bar {
   position: fixed;
@@ -198,8 +193,10 @@ svg { flex-shrink: 0; }
   font-size: 12px;
   font-weight: 550;
   box-shadow: 0 8px 20px #0000001a;
-  transition: background-color 150ms, transform 150ms;
+  transition: background-color 150ms, color 150ms, box-shadow 150ms, transform 150ms;
 }
+.target-fab-item { flex-shrink: 0; margin-inline-end: 8px; }
+.target-fab-item > .target-fab { width: max-content; }
 .target-fab-primary { color: var(--accent-ink); background: var(--accent); }
 .target-fab-primary:disabled { color: var(--muted); background: var(--inset); }
 .target-fab-secondary { border: 1px solid var(--line); color: var(--text); background: var(--panel); }
@@ -228,13 +225,11 @@ svg { flex-shrink: 0; }
   font-size: 11px;
   box-shadow: 0 4px 16px #0000001a;
   pointer-events: none;
-  animation: page-appear 150ms ease-out;
 }
 @media (hover: hover) {
   .ui-check:not(:disabled):hover, .ui-radio:not(:disabled):hover { box-shadow: 0 0 0 4px var(--accent-bg); border-color: var(--accent); }
   .target-menu-item:not(:disabled):hover { background: var(--inset); }
 }
-.target-fab { animation: page-appear 150ms ease-out; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition-duration: 0s !important; scroll-behavior: auto !important; }
 }
