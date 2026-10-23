@@ -3,8 +3,8 @@
   import { fade } from "svelte/transition"
   import {
     RefreshCw, Loader2, ShieldCheck, ShieldAlert, ShieldQuestion,
-    Languages, HardDrive, Download,
-    CalendarClock, History, Monitor, Sun, Moon, Square
+    Languages, HardDrive, Download, ArrowLeft, ChevronRight, EllipsisVertical,
+    CalendarClock, History, Monitor, Sun, Moon, Square, ListChecks
   } from "lucide-svelte"
   import { exec, toast, enableEdgeToEdge, type ExecResult } from "./lib/bridge"
   import { messages, detect, isLocale, supportedLanguages, type Locale } from "./lib/i18n"
@@ -13,7 +13,32 @@
   import LogOutput from "./lib/components/LogOutput.svelte"
   import { ui } from "./lib/ui"
   import CertificateDetails from "./lib/components/CertificateDetails.svelte"
+  import TargetManager from "./lib/components/TargetManager.svelte"
+  import Toast from "./lib/components/Toast.svelte"
   import { parseCertificateStatus, certificateStatusForSerial, type CertificateVerification, type CertificateValidity, type ValidityStatus } from "./lib/certificateStatus"
+
+  // Hash paths also work when the static WebUI is opened directly or refreshed.
+  let targetsPage = $state(typeof window !== "undefined" && window.location.hash === "#/targets")
+  let targetManager: { canLeave(): boolean; toggleMenu(): void } | undefined = $state()
+  let targetMenuOpen = $state(false)
+  let targetTitleVisible = $state(false)
+  function syncRoute() {
+    const next = window.location.hash === "#/targets"
+    if (targetsPage && !next && targetManager && !targetManager.canLeave()) {
+      // Restore a history entry so Back can return home after the guard clears.
+      window.location.hash = "/targets"
+      return
+    }
+    targetsPage = next
+    themeOpen = false
+    languageOpen = false
+  }
+  function returnHome(event: MouseEvent) {
+    event.preventDefault()
+    if (targetManager && !targetManager.canLeave()) return
+    targetsPage = false
+    window.location.hash = "/"
+  }
 
   const MODULE_ID = "keybox-lite"
   const badge = "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[7px] px-1.5 py-0.5 text-[11px] font-[550] leading-snug"
@@ -446,9 +471,12 @@
     syncColor()
     colorMedia.addEventListener("change", syncColor)
     enableEdgeToEdge()
+    window.addEventListener("hashchange", syncRoute)
+    syncRoute()
     void refresh()
     return () => {
       disposed = true
+      window.removeEventListener("hashchange", syncRoute)
       clearTimeout(outputTimer)
       outputTimer = undefined
       pendingOutput = ""
@@ -458,11 +486,19 @@
   })
 </script>
 
+<svelte:head><title>{targetsPage ? "Tricky Store" : "Keybox Lite"}</title></svelte:head>
+
 <div class="app-shell">
-  <main class="mx-auto w-full max-w-[640px] px-3 pt-3 pb-5 max-[359px]:px-2">
-    <header class="mb-3 flex items-center gap-2">
-      <img class="block size-11 shrink-0 max-[359px]:size-[38px]" src="./icon.svg" alt="" width="44" height="44" />
-      <div class="min-w-0 flex-1 [&_h1]:text-xl [&_h1]:font-[650] [&_h1]:leading-[1.35] [&_h1]:tracking-[-.6px] [&_h1]:max-[359px]:text-lg [&_p]:mt-0.5 [&_p]:text-xs [&_p]:text-[var(--muted)]"><h1>Keybox Lite</h1><p>{m.subtitle}</p></div>
+  <main class="mx-auto w-full max-w-[var(--page-width)] px-[var(--page-gutter)] pt-[var(--page-top)] pb-5">
+    <header class={targetsPage ? "target-toolbar flex min-h-10 items-center gap-1.5" : "mb-3 flex items-center gap-2"}>
+      {#if targetsPage}
+        <a href="#/" class={ui.iconButton} aria-label={m.targetsBack} title={m.targetsBack} onclick={returnHome}><ArrowLeft size={18} /></a>
+        <div class="target-toolbar-title min-w-0 flex-1 truncate text-sm font-semibold" class:is-visible={targetTitleVisible} aria-hidden={!targetTitleVisible}>Tricky Store</div>
+        <button id="targets-menu-trigger" type="button" class={ui.iconButton + " target-more"} aria-label={m.targetsMore} aria-haspopup="menu" aria-controls="targets-menu" aria-expanded={targetMenuOpen}
+          onclick={() => targetManager?.toggleMenu()}><EllipsisVertical size={19} /></button>
+      {:else}
+        <img class="block size-11 shrink-0 max-[359px]:size-[38px]" src="./icon.svg" alt="" width="44" height="44" />
+        <div class="min-w-0 flex-1 [&_h1]:text-xl [&_h1]:font-[650] [&_h1]:leading-[1.35] [&_h1]:tracking-[-.6px] [&_h1]:max-[359px]:text-lg [&_p]:mt-0.5 [&_p]:text-xs [&_p]:text-[var(--muted)]"><h1>Keybox Lite</h1><p>{m.subtitle}</p></div>
       <div class="flex items-center {ui.buttonGroup}">
         <Dropdown id="theme-options" label={m.theme} options={themeOptions} selected={theme} open={themeOpen} {reducedMotion} onOpenChange={toggleTheme} onSelect={setTheme}>
           {#snippet trigger()}
@@ -476,14 +512,15 @@
           {#snippet trigger()}<Languages size={18} />{/snippet}
         </Dropdown>
       </div>
+      {/if}
     </header>
 
-    {#if error}
-      <div role="alert" class="mb-2 flex items-start gap-1.5 rounded-xl bg-[var(--red-bg)] px-2.5 py-2 text-xs leading-relaxed text-[var(--red)] [overflow-wrap:anywhere] [&_svg]:mt-0.5" in:fade={{ duration: reducedMotion ? 0 : 180 }}>
-        <ShieldAlert size={17} /><span>{error}</span>
-      </div>
-    {/if}
+    <Toast message={error} active={!targetsPage} closeLabel={m.targetsClose} onclose={() => error = ""} />
 
+    {#if targetsPage}
+      <TargetManager {bin} {lang} disabled={busy !== null || !moddir} bind:this={targetManager} onMenuChange={(open) => targetMenuOpen = open} onTitleVisibility={(visible) => targetTitleVisible = visible} />
+    {:else}
+    <div class="page-enter">
     <section class="{ui.panel} relative" aria-busy={!initialDone || busy === "refresh"}>
       <div class="{ui.heading}">
         <h2 class={ui.headingTitle}><HardDrive size={17} />{m.installed}</h2>
@@ -564,6 +601,8 @@
     <CertificateDetails certificates={info?.validity?.certificates} serials={info?.serials}
       verification={certificateVerification} integrity={info?.integrity} messages={m} bind:open={detailsOpen} />
 
+    <a href="#/targets" class="{ui.panel} flex min-h-10 items-center justify-between gap-2 !py-2 text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--inset)]"><span class={ui.headingTitle}><ListChecks size={17} />{m.targetsTitle}</span><ChevronRight size={17} /></a>
+
     <section class="{ui.panel}">
       <div class="{ui.heading}"><h2 class={ui.headingTitle}><CalendarClock size={17} />{m.schedule}</h2></div>
       <div class="grid grid-cols-3 rounded-[10px] bg-[var(--inset)] p-0.5 {ui.buttonGroup}">
@@ -585,5 +624,7 @@
 
     <LogOutput {output} lines={outputLines} title={savedLogVisible ? m.savedUpdateLog : m.output} hint={m.hint}
       viewSavedLogLabel={m.savedUpdateLog} disabled={busy !== null || !moddir} onViewSavedLog={showLog} />
+    </div>
+    {/if}
   </main>
 </div>

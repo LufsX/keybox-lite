@@ -59,7 +59,7 @@ function harness(t) {
     $derived: (value) => value,
     $effect() {},
     localStorage: { getItem() { return null } },
-    window: { matchMedia: () => media },
+    window: { matchMedia: () => media, location: { hash: "" }, addEventListener() {}, removeEventListener() {} },
     onMountForTest: () => mount(),
     setTimeout(fn, ms) {
       const id = setTimeout(() => { timers.delete(id); fn() }, ms)

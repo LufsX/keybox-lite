@@ -27,10 +27,11 @@ test("stages, warnings, source routes and verification results retain exact text
 })
 
 test("accelerated route labels use the full hostname and keep the download URL intact", () => {
-  const action = readFileSync(new URL("../../action.sh", import.meta.url), "utf8")
-  assert.match(action, /^ACCEL="https:\/\/c\.etc\.moe\/"$/m)
-  const labels = Array.from(action.matchAll(/\b(?:KBL_ROUTE|route)=(c\.etc[^\s;]*)/g), match => match[1])
-  assert.deepEqual(labels, ["c.etc.moe", "c.etc.moe"])
+  const runtime = readFileSync(new URL("../../src/internal/runtime/runtime.go", import.meta.url), "utf8")
+  assert.match(runtime, /accel:\s*"https:\/\/c\.etc\.moe\/"/)
+  const parsed = parseLogLine("[meow / c.etc.moe] [FETCH] https://c.etc.moe/https://example.test/key")
+  assert.equal(flatten([parsed]), "[meow / c.etc.moe] [FETCH] https://c.etc.moe/https://example.test/key")
+  assert.equal(parsed.parts.find(part => part.tone === "source")?.text, "[meow / c.etc.moe]")
 })
 
 test("ANSI SGR, cursor codes, OSC links, control strings and CR never leak into logs", () => {
