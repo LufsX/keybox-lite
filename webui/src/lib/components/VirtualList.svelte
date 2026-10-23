@@ -35,6 +35,9 @@
 
   let active = false
   let catalogMotionUntil = 0
+  let anchorSuppressedUntil = 0
+  let reordering = $state(false)
+  let reorderTimer: ReturnType<typeof setTimeout> | undefined
   let frame = 0
   let target: HTMLElement | null = null
   let current: VirtualIndex | undefined
@@ -51,7 +54,7 @@
   }
 
   function rememberAnchor() {
-    if (anchor || !current?.keys.length || !root) return
+    if (performance.now() < anchorSuppressedUntil || anchor || !current?.keys.length || !root) return
     const view = readViewport()
     localTop = view.top - root.getBoundingClientRect().top
     viewport = view.height
@@ -93,12 +96,27 @@
     end = range.end
   }
 
-  $effect(() => {
+  $effect.pre(() => {
     const next = index
     untrack(() => {
-      rememberAnchor()
-      if (!current || current.keys.length !== next.keys.length || current.keys.some((key, i) => key !== next.keys[i])) {
-        catalogMotionUntil = performance.now() + 240
+      const changed = !current || current.keys.length !== next.keys.length || current.keys.some((key, i) => key !== next.keys[i])
+      const reordered = changed && current && current.keys.length === next.keys.length && next.keys.every(key => current!.positions.has(key))
+      if (reordered) {
+        // A selection reorder moves rows, not the user's viewport. Ignore the
+        // following measurement batch's anchor compensation as well.
+        anchor = null
+        anchorSuppressedUntil = performance.now() + 240
+        reordering = true
+        clearTimeout(reorderTimer)
+        reorderTimer = setTimeout(() => { reordering = false; reorderTimer = undefined }, 240)
+      } else {
+        rememberAnchor()
+        if (changed) {
+          catalogMotionUntil = performance.now() + 240
+          reordering = false
+          clearTimeout(reorderTimer)
+          reorderTimer = undefined
+        }
       }
       current = next
       // Bound the keyed height cache when searches/catalog refreshes remove items.
@@ -189,6 +207,7 @@
     schedule()
     return () => {
       active = false
+      clearTimeout(reorderTimer)
       observer?.disconnect()
       observer = undefined
       window.removeEventListener("scroll", schedule, true)
@@ -206,7 +225,7 @@
   })
 </script>
 
-<div bind:this={root} class="virtual-list" style:height={total + "px"}
+<div bind:this={root} class="virtual-list" class:is-reordering={reordering} style:height={total + "px"}
   onfocusin={focus} onfocusout={blur}>
   {#each rows as row (row.key)}
     <div use:measure={row.key} data-virtual-key={row.key} data-index={row.index}
@@ -231,5 +250,9 @@
     left: 0;
     width: 100%;
     display: flow-root;
+  }
+  .is-reordering .virtual-row { transition: transform 180ms cubic-bezier(.2, .7, .2, 1); }
+  @media (prefers-reduced-motion: reduce) {
+    .virtual-row { transition: none; }
   }
 </style>
