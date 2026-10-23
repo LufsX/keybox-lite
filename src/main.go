@@ -15,6 +15,7 @@ import (
 	"keyboxlite/internal/decode"
 	"keyboxlite/internal/info"
 	"keyboxlite/internal/keybox"
+	"keyboxlite/internal/runtime"
 	"keyboxlite/internal/status"
 	"keyboxlite/internal/targets"
 	"keyboxlite/internal/updatejob"
@@ -28,6 +29,8 @@ func main() {
 	switch os.Args[1] {
 	case "targets":
 		os.Exit(targets.Run(os.Args[2:]))
+	case "update", "settings", "service", "maintenance", "uninstall":
+		os.Exit(runtime.Run(os.Args[1:]))
 	case "run-update":
 		os.Exit(updatejob.Run(os.Args[2:]))
 	case "cancel-update":
@@ -152,7 +155,7 @@ func read(args []string, n int, msg string) ([]byte, error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: keyboxlite targets|backend|prepare|decode-meow|decode-spectre|decode-addon|spectre-url|spectre-urls|serials|check|info|verify ...")
+	fmt.Fprintln(os.Stderr, "usage: keyboxlite targets|update|settings|service|maintenance|uninstall|run-update|cancel-update|backend|prepare|decode-meow|decode-spectre|decode-addon|spectre-url|spectre-urls|serials|check|info|verify ...")
 	os.Exit(2)
 }
 

@@ -47,8 +47,8 @@ func escapeStatusText(text string) string {
 // Run: 0 = time-valid and not revoked, 1 = revoked/suspended,
 // 2 = could not check, 3 = expired or not yet valid.
 func Run(args []string) int {
-	accel := os.Getenv("KB_ACCEL")
-	if accel == "" {
+	accel, configured := os.LookupEnv("KB_ACCEL")
+	if !configured {
 		accel = "https://c.etc.moe/"
 	}
 	kbPath := ""
