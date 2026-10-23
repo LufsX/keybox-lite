@@ -1,6 +1,6 @@
 // Command keyboxlite: keybox helpers for the Keybox Lite module.
 //
-// Downloads invoke curl/wget; update jobs run and cancel shell process groups.
+// Downloads invoke curl/wget; update jobs run and cancel dedicated process groups.
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 	"keyboxlite/internal/info"
 	"keyboxlite/internal/keybox"
 	"keyboxlite/internal/status"
+	"keyboxlite/internal/targets"
 	"keyboxlite/internal/updatejob"
 	"keyboxlite/internal/verify"
 )
@@ -25,6 +26,8 @@ func main() {
 		usage()
 	}
 	switch os.Args[1] {
+	case "targets":
+		os.Exit(targets.Run(os.Args[2:]))
 	case "run-update":
 		os.Exit(updatejob.Run(os.Args[2:]))
 	case "cancel-update":
@@ -149,7 +152,7 @@ func read(args []string, n int, msg string) ([]byte, error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: keyboxlite backend|prepare|decode-meow|decode-spectre|decode-addon|spectre-url|spectre-urls|serials|check|info|verify ...")
+	fmt.Fprintln(os.Stderr, "usage: keyboxlite targets|backend|prepare|decode-meow|decode-spectre|decode-addon|spectre-url|spectre-urls|serials|check|info|verify ...")
 	os.Exit(2)
 }
 
