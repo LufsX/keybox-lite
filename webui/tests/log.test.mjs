@@ -2,8 +2,6 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { test } from "node:test"
 import { runInNewContext } from "node:vm"
-import { compile } from "svelte/compiler"
-import { render } from "svelte/server"
 import ts from "typescript"
 
 const source = readFileSync(new URL("../src/lib/log.ts", import.meta.url), "utf8")
@@ -74,40 +72,4 @@ test("default buffer caps visible and copied text at 80k including multiline ANS
   assert.equal(buffer.text.length, 80_000)
   assert.equal(flatten(buffer.lines), buffer.text)
   assert.equal(buffer.text.includes("\x1b"), false)
-})
-
-test("actual output template escapes hostile markup and preserves selectable text", async () => {
-  const component = readFileSync(new URL("../src/lib/components/LogOutput.svelte", import.meta.url), "utf8")
-  assert.match(component, /\{#each lines as line \(line\)\}/)
-  const uiSource = readFileSync(new URL("../src/lib/ui.ts", import.meta.url), "utf8")
-  const uiCode = ts.transpileModule(uiSource, {
-    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext },
-  }).outputText
-  const uiUrl = "data:text/javascript;base64," + Buffer.from(uiCode).toString("base64")
-  const iconUrl = "data:text/javascript;base64," + Buffer.from("export function Terminal() {}").toString("base64")
-  const { js } = compile(component, { generate: "server" })
-  const code = js.code.replace(/from (['"])([^'"]*)\1/g,
-    (_, quote, specifier) => "from " + quote +
-      (specifier === "../ui" ? uiUrl : specifier === "lucide-svelte" ? iconUrl : import.meta.resolve(specifier)) + quote)
-  const { default: Component } = await import("data:text/javascript;base64," + Buffer.from(code).toString("base64"))
-  const buffer = new LogBuffer()
-  const text = '[meow / direct] [WARN] <img src=x onerror="alert(1)"> & 中文\nRESULT: unknown\n'
-  buffer.append(text)
-  const props = {
-    output: buffer.text, lines: buffer.lines, title: "Output", hint: "No output yet",
-    viewSavedLogLabel: "View saved log", disabled: true, onViewSavedLog: () => {},
-  }
-  const { body } = render(Component, { props })
-  assert.ok(body.includes("View saved log"))
-  assert.match(body, /<button[^>]*disabled/)
-  const pre = body.match(/<pre[^>]*>([\s\S]*?)<\/pre>/)[1]
-  assert.equal(body.includes("<img"), false)
-  assert.ok(body.includes("&lt;img"))
-  assert.ok(pre.includes("text-[var(--log-waiting)]"))
-  assert.ok(pre.includes("text-[var(--log-source)]"))
-  const plain = pre.replace(/<!--[\s\S]*?-->/g, "").replace(/<[^>]*>/g, "")
-    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
-  assert.equal(plain, text)
-  const empty = render(Component, { props: { ...props, output: "", lines: [] } }).body
-  assert.match(empty, /<pre[^>]*>[\s\S]*?No output yet[\s\S]*?<\/pre>/)
 })

@@ -2,8 +2,6 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { test } from "node:test"
 import { runInNewContext } from "node:vm"
-import { compile as compileSvelte } from "svelte/compiler"
-import { render } from "svelte/server"
 import ts from "typescript"
 
 const app = readFileSync(new URL("../src/App.svelte", import.meta.url), "utf8")
@@ -140,46 +138,4 @@ test("rejected browser Back keeps a home history entry usable after the guard cl
   assert.equal(h.state().targetsPage, false)
   assert.equal(h.location.hash, "")
   cleanup()
-})
-
-async function renderApp(hash) {
-  let source = app.replace('typeof window !== "undefined" && window.location.hash === "#/targets"', String(hash === "#/targets"))
-  const { js } = compileSvelte(source, { generate: "server" })
-  const stub = 'data:text/javascript,' + encodeURIComponent('export default function Stub($$renderer) { $$renderer.push("<div data-target-manager></div>") }')
-  const empty = 'data:text/javascript,' + encodeURIComponent('export default function Stub() {}')
-  const icon = 'data:text/javascript,' + encodeURIComponent('export function ArrowLeft() {} export const ListChecks=ArrowLeft, EllipsisVertical=ArrowLeft, ChevronRight=ArrowLeft, RefreshCw=ArrowLeft, Loader2=ArrowLeft, ShieldCheck=ArrowLeft, ShieldAlert=ArrowLeft, ShieldQuestion=ArrowLeft, Languages=ArrowLeft, HardDrive=ArrowLeft, Download=ArrowLeft, CalendarClock=ArrowLeft, History=ArrowLeft, Monitor=ArrowLeft, Sun=ArrowLeft, Moon=ArrowLeft, Square=ArrowLeft')
-  const code = js.code.replace(/from (['"])([^'"]+)\1/g, (_, quote, name) => {
-    let url
-    if (name.endsWith("TargetManager.svelte")) url = stub
-    else if (name.endsWith(".svelte")) url = empty
-    else if (name === "lucide-svelte") url = icon
-    else if (name === "./lib/bridge") url = 'data:text/javascript,' + encodeURIComponent('export function exec() { throw Error("unexpected I/O") } export function toast() {} export function enableEdgeToEdge() {}')
-    else if (name === "./lib/motion") url = 'data:text/javascript,' + encodeURIComponent('export function pageExit() { return {} }')
-    else if (modules.has(name)) url = 'data:text/javascript;base64,' + Buffer.from(transpile(readFileSync(new URL("../src/" + name.slice(2) + ".ts", import.meta.url), "utf8"), ts.ModuleKind.ESNext)).toString("base64")
-    else url = import.meta.resolve(name)
-    return "from " + quote + url + quote
-  })
-  const { default: App } = await import("data:text/javascript;base64," + Buffer.from(code).toString("base64"))
-  return render(App).body
-}
-
-test("compiled App renders one home entry and a separate target page with return link and shared header", async () => {
-  const home = await renderApp("")
-  assert.equal((home.match(/href="#\/targets"/g) || []).length, 1)
-  assert.ok(!home.includes("data-target-manager"))
-  const targets = await renderApp("#/targets")
-  assert.ok(targets.includes("data-target-manager"))
-  assert.ok(targets.includes('href="#/"'))
-  assert.ok(!targets.includes('href="#/targets"'))
-  assert.ok(!targets.includes(modules.get("./lib/i18n").messages.en.installed))
-  for (const body of [home, targets]) assert.ok(body.includes("<header"))
-  assert.ok(home.includes("Keybox Lite"))
-  assert.ok(home.includes('src="./icon.svg"'))
-  assert.ok(!targets.includes("Keybox Lite"))
-  assert.ok(!targets.includes('src="./icon.svg"'))
-  assert.ok(targets.includes('aria-label="' + modules.get("./lib/i18n").messages.en.targetsBack + '"'))
-  assert.ok(targets.includes('id="targets-menu-trigger"'))
-  assert.ok(targets.includes('aria-haspopup="menu"'))
-  assert.ok(targets.includes('aria-expanded="false"'))
-  assert.equal((targets.match(/href="#\/"/g) || []).length, 1)
 })

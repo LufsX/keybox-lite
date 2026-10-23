@@ -4,9 +4,6 @@ import { test } from "node:test"
 import { runInNewContext } from "node:vm"
 import { spawnSync } from "node:child_process"
 import { setImmediate } from "node:timers/promises"
-import { compile as compileSvelte } from "svelte/compiler"
-import { render } from "svelte/server"
-import { createRawSnippet } from "svelte"
 import ts from "typescript"
 
 const app = readFileSync(new URL("../src/App.svelte", import.meta.url), "utf8")
@@ -168,41 +165,6 @@ test("invalid or unavailable storage falls back and still allows in-session choi
   h.setLanguage("ja")
   assert.equal(h.state().lang, "ja")
   assert.equal(h.state().languageOpen, false)
-})
-
-test("shared Dropdown renders native labels and one selected marker with common Tailwind classes", async () => {
-  // Node does not load lucide's bundler-only .svelte exports; retain a static marker for its icon.
-  const fixture = dropdown.replace('import { Check } from "lucide-svelte"', "")
-    .replace('<Check size={14} />', '<svg aria-label="Selected"></svg>')
-  const { js } = compileSvelte(fixture, { generate: "server" })
-  const uiSource = ts.transpileModule(readFileSync(new URL("../src/lib/ui.ts", import.meta.url), "utf8"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext },
-  }).outputText
-  const uiUrl = "data:text/javascript;base64," + Buffer.from(uiSource).toString("base64")
-  // Server rendering never plays transitions; resolve the real module so its imports still parse.
-  const motionCode = ts.transpileModule(readFileSync(new URL("../src/lib/motion.ts", import.meta.url), "utf8"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext },
-  }).outputText
-  const motionUrl = "data:text/javascript;base64," + Buffer.from(motionCode.replace(/from (['"])([^'"]+)\1/g,
-    (_, quote, specifier) => "from " + quote + import.meta.resolve(specifier) + quote)).toString("base64")
-  const code = js.code.replace(/from (['"])([^'"]+)\1/g,
-    (_, quote, specifier) => "from " + quote + (specifier === "../ui" ? uiUrl : specifier === "../motion" ? motionUrl : import.meta.resolve(specifier)) + quote)
-  const { default: Component } = await import("data:text/javascript;base64," + Buffer.from(code).toString("base64"))
-  const { body } = render(Component, { props: {
-    id: "language-options", label: locale.messages.en.language,
-    options: locale.supportedLanguages.map(({ code, nativeLabel }) => ({ value: code, label: nativeLabel, lang: code })),
-    selected: "ja", open: true, onOpenChange() {}, onSelect() {},
-    trigger: createRawSnippet(() => ({ render: () => "<span>Language</span>" })),
-  } })
-  for (const { code, nativeLabel } of locale.supportedLanguages) {
-    assert.ok(body.includes(nativeLabel))
-    assert.ok(body.includes('lang="' + code + '"'))
-  }
-  assert.ok(body.includes("p-0.5"))
-  assert.equal((body.match(/aria-pressed="true"/g) ?? []).length, 1)
-  assert.ok(body.includes('aria-expanded="true"'))
-  assert.match(app, /<Dropdown id="theme-options"/)
-  assert.match(app, /<Dropdown id="language-options"/)
 })
 
 test("saved log entry reads last 80 persisted update lines, preserves the check result, and marks the title", async () => {

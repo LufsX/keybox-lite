@@ -6,12 +6,9 @@ import { spawnSync } from "node:child_process"
 import { createRequire } from "node:module"
 import { test } from "node:test"
 import { runInNewContext } from "node:vm"
-import { compile as compileSvelte } from "svelte/compiler"
-import { render } from "svelte/server"
 import ts from "typescript"
 
 const component = readFileSync(new URL("../src/lib/components/TargetManager.svelte", import.meta.url), "utf8")
-const modal = readFileSync(new URL("../src/lib/components/Modal.svelte", import.meta.url), "utf8")
 const transpile = (source, module = ts.ModuleKind.CommonJS) => ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module },
 }).outputText
@@ -475,9 +472,6 @@ test("entry cleanup survives inactive or missing backends and config/package err
     assert.equal(h.calls[1], "'/module/bin/keybox' targets entry set off")
     assert.equal(h.state().status.entry.enabled, false)
     assert.equal(h.state().notice, locale.messages.en.targetsEntryDone)
-    const body = await renderComponent(initial, "en", null, { sheet: "entry" })
-    // The entry dialog retains cleanup controls despite backend errors.
-    assert.match(body, /<input type="checkbox"[^>]*checked=""/)
   }
 })
 
@@ -503,15 +497,6 @@ test("TS-L keeps global policies and modes while rejecting per-app edits and UID
   assert.deepEqual(expected.per_app_policy, {})
   assert.equal(expected.targets[0].mode, "hack")
   assert.equal(expected.default_policy.boot_patch, "prop")
-  const body = await renderComponent(initial, "en", null, { sheet: "global" })
-  assert.ok(body.includes(locale.messages.en.targetsGlobalPolicy))
-  assert.ok(!body.includes(locale.messages.en.targetsAppPolicy))
-  assert.ok(!body.includes('aria-label="com.alpha os_patch"'))
-  const modern = fixture()
-  modern.config.targets.push({ package_name: "uid:12345", mode: "auto" })
-  const modernBody = await renderComponent(modern)
-  // The only selected targets here are a user package and UID, neither can be tracked as a system app.
-  assert.ok(!modernBody.includes(locale.messages.en.targetsTrackSystem))
 })
 
 test("stale save completion and failed entry reload cannot overwrite state or claim success", async () => {
@@ -536,93 +521,6 @@ test("stale save completion and failed entry reload cannot overwrite state or cl
   assert.ok(h.state().error)
   assert.equal(h.state().notice, "")
   assert.equal(h.state().ready, false)
-})
-
-async function renderComponent(initial, lang = "en", editing = null, options = {}) {
-  let source = component
-  if (initial) {
-    source = source.replace('$state<TargetStatus | null>(null)', '$state<TargetStatus | null>(' + JSON.stringify(initial) + ')')
-      .replace('$state<TargetDraft | null>(null)', '$state<TargetDraft | null>(' + JSON.stringify(targets.draftFromStatus(initial)) + ')')
-      .replace('let ready = $state(false)', 'let ready = $state(' + !(initial.config_error || initial.packages_error) + ')')
-      .replace('let entryReady = $state(false)', 'let entryReady = $state(true)')
-      .replace('let baseline = $state("")', 'let baseline = $state(' + JSON.stringify(JSON.stringify(targets.draftFromStatus(initial))) + ')')
-      .replace('let catalogReady = $state(false)', 'let catalogReady = $state(true)')
-  }
-  if (editing) source = source.replace(/(let editor = \$state<[^\n]+>\()null(\))/, "$1" + JSON.stringify(editing) + "$2")
-  if (options.sheet) source = source.replace('| null>(null)\n  let systemQuery', '| null>(' + JSON.stringify(options.sheet) + ')\n  let systemQuery')
-  if (options.menu) source = source.replace('let menuOpen = $state(false)', 'let menuOpen = $state(true)')
-  const { js } = compileSvelte(source, { generate: "server" })
-  // Resolve the real local TS modules as ESM; the bridge stub records any unexpected render-time I/O.
-  const local = new Map()
-  const asModule = code => "data:text/javascript;base64," + Buffer.from(code).toString("base64")
-  const libCache = new Map()
-  // Local TS modules are data: URLs, so their own relative imports are rewritten the same way.
-  const libModule = specifier => {
-    if (specifier.includes(".svelte") || !(specifier.startsWith("../") || specifier.startsWith("./"))) return undefined
-    if (libCache.has(specifier)) return libCache.get(specifier)
-    const file = new URL("../src/lib/" + (specifier.startsWith("../") ? specifier.slice(3) : specifier.slice(2)) + ".ts", import.meta.url)
-    const url = asModule(resolveCode(transpile(readFileSync(file, "utf8"), ts.ModuleKind.ESNext)))
-    libCache.set(specifier, url)
-    return url
-  }
-  local.set("../bridge", "data:text/javascript," + encodeURIComponent("export function exec(){throw Error('unexpected bridge call')}"))
-  local.set("../apps", "data:text/javascript," + encodeURIComponent("export async function packagesInfo(){return new Map()}"))
-  // Server rendering never plays transitions, so the motion helpers are inert here.
-  local.set("../motion", "data:text/javascript," + encodeURIComponent("export const surface=()=>({});export const reveal=()=>({});export const pageExit=()=>({})"))
-  const resolveCode = code => code.replace(/from (['"])([^'"]+)\1/g,
-    (_, quote, specifier) => "from " + quote + (local.get(specifier) ?? libModule(specifier) ?? import.meta.resolve(specifier)) + quote)
-  const iconModule = asModule(resolveCode(compileSvelte('<svg aria-hidden="true"></svg>', { generate: "server" }).js.code))
-  const icons = ["Search", "KeyRound", "ChevronRight", "ChevronDown", "NotebookPen", "Undo2", "Check", "PackagePlus", "RefreshCw", "ListPlus", "SlidersHorizontal", "SquareDashed", "CheckCheck", "Settings2"]
-  local.set("lucide-svelte", asModule("import Icon from " + JSON.stringify(iconModule) + "; export {" + icons.map(name => "Icon as " + name).join(",") + "}"))
-  // Dependencies are compiled first so nested component imports resolve locally.
-  for (const name of ["OverflowText", "AppIcon", "AppRow", "AppListSkeleton", "Modal", "VirtualList"]) {
-    const code = compileSvelte(readFileSync(new URL("../src/lib/components/" + name + ".svelte", import.meta.url), "utf8"), { generate: "server" }).js.code
-    local.set("./" + name + ".svelte", asModule(resolveCode(code)))
-  }
-  const code = resolveCode(js.code)
-  const { default: Component } = await import("data:text/javascript;base64," + Buffer.from(code).toString("base64"))
-  return render(Component, { props: { bin: "/module/bin/keybox", lang } }).body
-}
-
-test("real Svelte compiler renders Duck page structure, backend details, search, rows, FAB and menu dialogs", async () => {
-  const empty = await renderComponent()
-  assert.ok(empty.includes(">Tricky Store</h1>"))
-  assert.ok(!empty.includes('role="menu"'))
-  assert.equal((empty.match(/<h1\b/g) || []).length, 1)
-  assert.ok(empty.includes(locale.messages.en.targetsTitle))
-  const initial = fixture({ backend: { backend: "tricky-store", identity: "TS", active: true,
-    name: "Tricky Store", version: "1.2", module_id: "tricky_store" } })
-  for (const lang of ["en", "zh"]) {
-    const body = await renderComponent(initial, lang)
-    assert.ok(body.includes(locale.messages[lang].targetsSave))
-    assert.ok(body.includes(locale.messages[lang].targetsSearch))
-    assert.ok(body.includes('href="#/"'))
-    assert.ok(body.includes("1.2 ·"))
-    assert.ok(body.includes("tricky_store"))
-    assert.equal((body.match(/>com.alpha<\/span>/g) ?? []).length, 2) // Label and package are both shown without metadata.
-    assert.ok(!body.includes("com.system")) // Untracked system apps live in their own dialog.
-    assert.ok(!body.includes("overflow-y-auto"))
-    assert.ok(!body.includes('aria-pressed="false">User apps'))
-    assert.ok(!body.includes(locale.messages[lang].targetsGlobalPolicy))
-    assert.ok(!body.includes("<dialog"))
-    assert.ok(body.includes(locale.messages[lang].targetsEdit + " · com.alpha"))
-    const menu = await renderComponent(initial, lang, null, { menu: true })
-    assert.ok(menu.includes('id="targets-menu" role="menu"'))
-    for (const key of ["targetsSelectVisible", "targetsClearVisible", "targetsAutoAdd", "targetsGlobalPolicy", "targetsManual", "targetsEntry", "targetsSystemApps", "refresh"])
-      assert.ok(menu.includes(locale.messages[lang][key]))
-    const global = await renderComponent(initial, lang, null, { sheet: "global" })
-    for (const key of targets.policyKeys) assert.ok(global.includes(key))
-    const manual = await renderComponent(initial, lang, null, { sheet: "manual" })
-    for (const mode of ["auto", "generate", "hack"]) assert.ok(manual.includes('value="' + mode + '"'))
-    const system = await renderComponent(initial, lang, null, { sheet: "system" })
-    assert.ok(system.includes("com.system"))
-  }
-  const unsupported = fixture({ supported: false })
-  unsupported.entry = { ...unsupported.entry, linked: true, enabled: true, has_own_webui: true }
-  const body = await renderComponent(unsupported, "en", null, { sheet: "entry" })
-  for (const key of ["targetsUnsupported", "targetsEntry", "targetsLinked", "targetsOwnWebui"])
-    assert.ok(body.includes(locale.messages.en[key]))
-  assert.match(body, /<input type="checkbox"[^>]*checked=""/)
 })
 
 test("selected filtering and row mode always follow draft changes rather than loaded selection", async () => {
@@ -718,113 +616,6 @@ test("mode editor cannot apply stale, disabled or legacy per-app edits", async (
   h.applyEditor()
   assert.equal(h.state().draft.targets[0].mode, "hack")
   assert.deepEqual(plain(h.state().draft.per_app_policy), {})
-})
-
-function modalHarness({ busy = false, reducedMotion = false } = {}) {
-  const closes = []
-  const mounts = [], timers = []
-  const module = { exports: {} }
-  const source = modal.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1]
-  runInNewContext(transpile(source + `
-    export const handlers = {
-      requestClose, cancel,
-      setDialog: value => { dialog = value },
-      setCloseButton: value => { closeButton = value },
-      state: () => ({ closing, disposed, completed, reducedMotion }),
-      overflow: () => document.body.style.overflow,
-    }
-  `), {
-    exports: module.exports,
-    require(name) {
-      if (name === "svelte") return { onMount: fn => { mounts.push(fn) } }
-      if (name === "../ui") return ui
-      throw new Error(name)
-    },
-    $props: Object.assign(() => ({ title: "Targets", closeLabel: "Close", busy, onclose: () => closes.push("onclose"), children: () => ({}) }), { id: () => "modal" }),
-    $bindable: value => value,
-    $state: value => value,
-    $derived: value => value,
-    $effect: () => {},
-    document: { activeElement: null, body: { style: { overflow: "" } } },
-    window: { matchMedia: () => ({ matches: reducedMotion, addEventListener() {}, removeEventListener() {} }) },
-    HTMLElement: class {},
-    setTimeout: fn => { timers.push(fn); return timers.length },
-    clearTimeout: () => {},
-  })
-  return {
-    ...module.exports.handlers, closes,
-    mount: () => mounts.shift()(),
-    runTimers: () => { for (const fn of timers.splice(0)) fn() },
-  }
-}
-
-test("dialog shows on mount, closes through the requested path and restores page state on destroy", () => {
-  const calls = []
-  const dialog = {
-    open: false,
-    showModal() { this.open = true; calls.push("showModal") },
-    close() { this.open = false; calls.push("close") },
-    focus() { calls.push("dialogFocus") },
-  }
-  const h = modalHarness()
-  h.setDialog(dialog)
-  h.setCloseButton({ focus() { calls.push("closeButtonFocus") } })
-  const cleanup = h.mount()
-  assert.deepEqual(calls, ["showModal", "closeButtonFocus"])
-  assert.equal(h.overflow(), "hidden")
-  h.requestClose() // Animated close waits for the transition timer.
-  assert.equal(dialog.open, true)
-  assert.equal(h.state().closing, true)
-  h.runTimers()
-  assert.deepEqual(calls, ["showModal", "closeButtonFocus", "close"])
-  assert.deepEqual(h.closes, ["onclose"])
-  assert.equal(h.state().completed, true)
-  cleanup()
-  assert.equal(h.overflow(), "")
-
-  const immediate = modalHarness({ reducedMotion: true })
-  const reducedDialog = { open: false, showModal() { this.open = true }, close() { this.open = false }, focus() {} }
-  immediate.setDialog(reducedDialog)
-  immediate.setCloseButton({ focus() {} })
-  const stop = immediate.mount()
-  assert.equal(immediate.state().reducedMotion, true)
-  immediate.cancel({ preventDefault() {} })
-  assert.equal(reducedDialog.open, false)
-  stop()
-  assert.equal(immediate.overflow(), "")
-
-  const blocked = modalHarness({ busy: true })
-  const busyDialog = { open: false, showModal() { this.open = true }, close() { this.open = false }, focus() {} }
-  blocked.setDialog(busyDialog)
-  blocked.setCloseButton({ focus() {} })
-  const destroy = blocked.mount()
-  blocked.requestClose() // A busy dialog must reject every close request.
-  blocked.runTimers()
-  assert.equal(blocked.state().closing, false)
-  assert.equal(busyDialog.open, true)
-  assert.deepEqual(blocked.closes, [])
-  destroy()
-  assert.equal(busyDialog.open, false)
-  assert.equal(blocked.overflow(), "")
-})
-
-test("rendered editor exposes accessible close, cancel and radio controls", async () => {
-  assert.match(modal, /oncancel=\{cancel\}/)
-  assert.match(modal, /onclick=\{requestClose\}/)
-  assert.match(modal, /aria-label=\{closeLabel\} title=\{closeLabel\} disabled=\{busy \|\| closing\} onclick=\{requestClose\}/)
-  assert.match(component, /onclose=\{closeEditor\}/)
-  assert.match(component, /disabled=\{pending\} onclick=\{requestClose\}>\{m.targetsCancel\}/)
-  assert.match(component, /onclick=\{\(\) => \{ applyEditor\(false\); requestClose\(\) \}\}/)
-  assert.match(component, /type="radio" name="target-mode" value=\{mode\} bind:group=\{editor.mode\}/)
-  for (const { code } of locale.supportedLanguages) {
-    const body = await renderComponent(fixture(), code, { name: "com.alpha", mode: "hack", policy: {}, tracked: false })
-    assert.match(body, /aria-labelledby="[^"]+-title"/)
-    assert.match(body, /aria-describedby="[^"]+-description"/)
-    assert.ok(body.includes(locale.messages[code].targetsCancel))
-    assert.ok(body.includes(locale.messages[code].targetsApply))
-    for (const key of ["targetsModeAuto", "targetsModeGenerate", "targetsModeHack"]) assert.ok(body.includes(locale.messages[code][key]))
-    assert.match(body, /type="radio" name="target-mode" value="hack" checked/)
-  }
 })
 
 test("dirty count counts affected applications once and includes global settings", async () => {

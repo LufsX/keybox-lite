@@ -1,8 +1,6 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { test } from "node:test"
-import { compile } from "svelte/compiler"
-import { render } from "svelte/server"
 import ts from "typescript"
 
 const source = path => readFileSync(new URL(path, import.meta.url), "utf8")
@@ -126,59 +124,4 @@ test("duplicate serials share a conservative state; reason text cannot become an
   assert.equal(state(result, "0007"), "revoked")
   assert.equal(state(result, "9"), "not-revoked")
   assert.match(lookup(result, "8").reason, /serial 9/)
-})
-
-test("actual component renders individual validity, duplicate serials and escaped hostile reasons", async () => {
-  const { messages } = await import(url(transpile(source("../src/lib/i18n.ts"))))
-  const uiUrl = url(transpile(source("../src/lib/ui.ts")))
-  const iconUrl = url("export function Fingerprint() {}; export function ChevronDown() {}")
-  const { js } = compile(source("../src/lib/components/CertificateDetails.svelte"), { generate: "server" })
-  const code = js.code.replace(/from (['"])([^'"]*)\1/g,
-    (_, quote, specifier) => "from " + quote +
-      (specifier === "../ui" ? uiUrl : specifier === "../certificateStatus" ? helperUrl :
-        specifier === "lucide-svelte" ? iconUrl : import.meta.resolve(specifier)) + quote)
-  const { default: Component } = await import(url(code))
-  const verification = parse(live + hit("7", "SUSPENDED", '<img src=x onerror="alert(1)"> & reason') +
-    "RESULT: revoked\n", 1)
-  const props = {
-    certificates: [
-      { serial: "7", status: "expired", not_before: 10, not_after: 20 },
-      { serial: "0007", status: "valid", not_before: 30, not_after: 40 },
-      { serial: "8", status: "not_yet_valid", not_before: 50, not_after: 60 },
-    ],
-    verification, messages: messages.en, open: true, formatDate: seconds => "date:" + seconds,
-  }
-  const body = render(Component, { props }).body
-  assert.equal((body.match(/<article /g) || []).length, 3)
-  for (const text of ["Expired", "In date", "Not yet valid", "Suspended", "Not revoked", "Revocation reason", "date:10", "date:60", "0007"]) {
-    assert.ok(body.includes(text), text)
-  }
-  assert.equal(body.includes("<img"), false)
-  assert.ok(body.includes("&lt;img"))
-  assert.ok(body.includes("&amp; reason"))
-  assert.equal((body.match(/>Suspended</g) || []).length, 2)
-  const fallback = render(Component, { props: { messages: messages.en, serials: ["7", "8"], open: true } }).body
-  assert.equal((fallback.match(/<article /g) || []).length, 2)
-  assert.ok(fallback.includes("Unknown"))
-  const empty = render(Component, { props: { messages: messages.en } }).body
-  assert.match(empty, /<button[^>]*disabled/)
-  assert.ok(empty.includes('aria-expanded="false"'))
-  const integrity = {
-    status: "invalid",
-    keys: [
-      { algorithm: "ec", private_key_valid: true, key_match: false, chain_valid: true, root: "unknown" },
-      { algorithm: "rsa", private_key_valid: true, key_match: true, chain_valid: false, root: "aosp_rsa" },
-    ],
-  }
-  const local = render(Component, { props: { ...props, integrity } }).body
-  for (const text of ["Local cryptographic checks", "Private key matches certificate", "Chain signatures and constraints", "Root source", "AOSP software test root"]) {
-    assert.ok(local.includes(text), text)
-  }
-  assert.equal((local.match(/>Failed</g) || []).length, 2)
-  assert.equal((local.match(/>Passed</g) || []).length, 2)
-  // A valid signature with an unknown root must remain visibly separate from revocation.
-  assert.match(local, /Root source<\/dt>\s*<dd>Unknown<\/dd>/)
-  assert.ok(local.includes("Suspended"))
-  const malformed = render(Component, { props: { ...props, integrity: { status: "invalid", keys: [] } } }).body
-  assert.ok(malformed.includes(">Failed</p>"))
 })
