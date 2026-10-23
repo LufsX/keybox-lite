@@ -3,6 +3,7 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync } from "no
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
+import { createRequire } from "node:module"
 import { test } from "node:test"
 import { runInNewContext } from "node:vm"
 import { compile as compileSvelte } from "svelte/compiler"
@@ -10,15 +11,25 @@ import { render } from "svelte/server"
 import ts from "typescript"
 
 const component = readFileSync(new URL("../src/lib/components/TargetManager.svelte", import.meta.url), "utf8")
+const modal = readFileSync(new URL("../src/lib/components/Modal.svelte", import.meta.url), "utf8")
 const transpile = (source, module = ts.ModuleKind.CommonJS) => ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module },
 }).outputText
-function load(path) {
+function load(path, deps = {}) {
   const exports = {}
-  runInNewContext(transpile(readFileSync(new URL(path, import.meta.url), "utf8")), { exports })
+  runInNewContext(transpile(readFileSync(new URL(path, import.meta.url), "utf8")), {
+    exports,
+    require(name) {
+      if (deps[name]) return deps[name]
+      throw new Error(name)
+    },
+  })
   return exports
 }
-const targets = load("../src/lib/targets.ts")
+const requireFromTest = createRequire(import.meta.url)
+const tinyPinyin = requireFromTest("tiny-pinyin")
+const appSort = load("../src/lib/appSort.ts", { "tiny-pinyin": { default: tinyPinyin, ...tinyPinyin } })
+const targets = load("../src/lib/targets.ts", { "./appSort": appSort })
 const locale = load("../src/lib/i18n.ts")
 const ui = load("../src/lib/ui.ts")
 const plain = value => JSON.parse(JSON.stringify(value))
@@ -53,15 +64,16 @@ function harness(initial = fixture()) {
   runInNewContext(transpile(script + `
     export const handlers = {
       canLeave, refresh, save, setEntry, select, selectVisible, setMode, setPolicy, trackSystem, autoAdd, addManual, beforeUnload,
-      openEditor, closeEditor, applyEditor, editPolicy, mountDialog, countChanges,
+      openEditor, closeEditor, applyEditor, editPolicy, countChanges,
       toggleMenu, closeMenu, dismissMenu, menuKeydown, menuAction, openSheet, closeSheet, toggleSystem, applySystem, discard, loadMetadata,
       bindMenu: node => { menuElement = node },
       editorMode: mode => { editor.mode = mode },
       editorTracked: value => { editor.tracked = value },
       state: () => ({ status, draft, baseline, ready, pending, error, notice, editor, menuOpen, sheet, systemDraft, metadata, dirty: changed() }),
       search: (text, kind = "all") => { query = text; filter = kind },
-      visible: () => status && draft ? visiblePackages(status, draft, query, filter, metadata) : [],
-      listed: () => status && draft ? visiblePackages(status, draft, query, "listed", metadata) : [],
+      // Mirror the component: rows are ordered by the selection captured on first load.
+      visible: () => status && draft ? visiblePackages(status, draft, query, filter, metadata, initialSelection ?? undefined) : [],
+      listed: () => status && draft ? visiblePackages(status, draft, query, "listed", metadata, initialSelection ?? undefined) : [],
       manual: (text, mode = "auto") => { manual = text; manualMode = mode; addManual() },
       context: (value, blocked = false) => { bin = value; disabled = blocked },
     }
@@ -77,9 +89,11 @@ function harness(initial = fixture()) {
       if (name === "../targets") return targets
       if (name === "../ui") return ui
       if (name === "../apps") return { packagesInfo(names, signal) { metadataCalls.push({ names, signal }); return metadataQueue.length ? metadataQueue.shift() : Promise.resolve(new Map()) } }
+      if (name === "../motion") return { surface: () => ({}), reveal: () => ({}), pageExit: () => ({}) }
+      if (name === "./AppListSkeleton.svelte") return {}
       throw new Error(name)
     },
-    $props: () => ({ bin: "/module/bin/keybox", lang: "en", onMenuChange: value => menuChanges.push(value) }),
+    $props: Object.assign(() => ({ bin: "/module/bin/keybox", lang: "en", onMenuChange: value => menuChanges.push(value) }), { id: () => "harness" }),
     AbortController, Element, document,
     setTimeout: fn => { const id = {}; timers.set(id, fn); return id },
     clearTimeout: id => timers.delete(id),
@@ -216,7 +230,8 @@ test("search and user/system filters bound bulk selection and clearing to visibl
   assert.equal(h.state().draft.per_app_policy["com.beta"], undefined)
   h.search("", "system")
   h.selectVisible(false)
-  assert.deepEqual(plain(h.state().draft.system_apps), [])
+  // Clearing untargets the visible rows but keeps system tracking; only the dialog or the editor untracks.
+  assert.deepEqual(plain(h.state().draft.system_apps), ["com.system"])
   h.manual("uid:12345", "auto")
   h.search("uid:")
   assert.equal(h.visible()[0].installed, false)
@@ -462,7 +477,7 @@ test("entry cleanup survives inactive or missing backends and config/package err
     assert.equal(h.state().notice, locale.messages.en.targetsEntryDone)
     const body = await renderComponent(initial, "en", null, { sheet: "entry" })
     // The entry dialog retains cleanup controls despite backend errors.
-    assert.ok(body.includes('<input type="checkbox" checked=""/>'))
+    assert.match(body, /<input type="checkbox"[^>]*checked=""/)
   }
 })
 
@@ -531,6 +546,7 @@ async function renderComponent(initial, lang = "en", editing = null, options = {
       .replace('let ready = $state(false)', 'let ready = $state(' + !(initial.config_error || initial.packages_error) + ')')
       .replace('let entryReady = $state(false)', 'let entryReady = $state(true)')
       .replace('let baseline = $state("")', 'let baseline = $state(' + JSON.stringify(JSON.stringify(targets.draftFromStatus(initial))) + ')')
+      .replace('let catalogReady = $state(false)', 'let catalogReady = $state(true)')
   }
   if (editing) source = source.replace(/(let editor = \$state<[^\n]+>\()null(\))/, "$1" + JSON.stringify(editing) + "$2")
   if (options.sheet) source = source.replace('| null>(null)\n  let systemQuery', '| null>(' + JSON.stringify(options.sheet) + ')\n  let systemQuery')
@@ -538,20 +554,28 @@ async function renderComponent(initial, lang = "en", editing = null, options = {
   const { js } = compileSvelte(source, { generate: "server" })
   // Resolve the real local TS modules as ESM; the bridge stub records any unexpected render-time I/O.
   const local = new Map()
-  for (const [specifier, file] of [["../targets", "targets.ts"], ["../i18n", "i18n.ts"], ["../ui", "ui.ts"]]) {
-    local.set(specifier, "data:text/javascript;base64," + Buffer.from(transpile(
-      readFileSync(new URL("../src/lib/" + file, import.meta.url), "utf8"), ts.ModuleKind.ESNext,
-    )).toString("base64"))
+  const asModule = code => "data:text/javascript;base64," + Buffer.from(code).toString("base64")
+  const libCache = new Map()
+  // Local TS modules are data: URLs, so their own relative imports are rewritten the same way.
+  const libModule = specifier => {
+    if (specifier.includes(".svelte") || !(specifier.startsWith("../") || specifier.startsWith("./"))) return undefined
+    if (libCache.has(specifier)) return libCache.get(specifier)
+    const file = new URL("../src/lib/" + (specifier.startsWith("../") ? specifier.slice(3) : specifier.slice(2)) + ".ts", import.meta.url)
+    const url = asModule(resolveCode(transpile(readFileSync(file, "utf8"), ts.ModuleKind.ESNext)))
+    libCache.set(specifier, url)
+    return url
   }
   local.set("../bridge", "data:text/javascript," + encodeURIComponent("export function exec(){throw Error('unexpected bridge call')}"))
   local.set("../apps", "data:text/javascript," + encodeURIComponent("export async function packagesInfo(){return new Map()}"))
+  // Server rendering never plays transitions, so the motion helpers are inert here.
+  local.set("../motion", "data:text/javascript," + encodeURIComponent("export const surface=()=>({});export const reveal=()=>({});export const pageExit=()=>({})"))
   const resolveCode = code => code.replace(/from (['"])([^'"]+)\1/g,
-    (_, quote, specifier) => "from " + quote + (local.get(specifier) ?? import.meta.resolve(specifier)) + quote)
-  const asModule = code => "data:text/javascript;base64," + Buffer.from(code).toString("base64")
+    (_, quote, specifier) => "from " + quote + (local.get(specifier) ?? libModule(specifier) ?? import.meta.resolve(specifier)) + quote)
   const iconModule = asModule(resolveCode(compileSvelte('<svg aria-hidden="true"></svg>', { generate: "server" }).js.code))
-  const icons = ["Search", "KeyRound", "ChevronRight", "NotebookPen", "Undo2", "Check", "RefreshCw", "ListPlus", "SlidersHorizontal", "SquareDashed", "CheckCheck", "Settings2"]
+  const icons = ["Search", "KeyRound", "ChevronRight", "ChevronDown", "NotebookPen", "Undo2", "Check", "PackagePlus", "RefreshCw", "ListPlus", "SlidersHorizontal", "SquareDashed", "CheckCheck", "Settings2"]
   local.set("lucide-svelte", asModule("import Icon from " + JSON.stringify(iconModule) + "; export {" + icons.map(name => "Icon as " + name).join(",") + "}"))
-  for (const name of ["AppIcon", "AppRow"]) {
+  // Dependencies are compiled first so nested component imports resolve locally.
+  for (const name of ["OverflowText", "AppIcon", "AppRow", "AppListSkeleton", "Modal", "VirtualList"]) {
     const code = compileSvelte(readFileSync(new URL("../src/lib/components/" + name + ".svelte", import.meta.url), "utf8"), { generate: "server" }).js.code
     local.set("./" + name + ".svelte", asModule(resolveCode(code)))
   }
@@ -598,7 +622,7 @@ test("real Svelte compiler renders Duck page structure, backend details, search,
   const body = await renderComponent(unsupported, "en", null, { sheet: "entry" })
   for (const key of ["targetsUnsupported", "targetsEntry", "targetsLinked", "targetsOwnWebui"])
     assert.ok(body.includes(locale.messages.en[key]))
-  assert.match(body, /<input type="checkbox" checked=""\s*\/>/)
+  assert.match(body, /<input type="checkbox"[^>]*checked=""/)
 })
 
 test("selected filtering and row mode always follow draft changes rather than loaded selection", async () => {
@@ -696,21 +720,106 @@ test("mode editor cannot apply stale, disabled or legacy per-app edits", async (
   assert.deepEqual(plain(h.state().draft.per_app_policy), {})
 })
 
-test("native modal lifecycle and rendered editor expose accessible close, cancel and radio controls", async () => {
-  const h = harness()
+function modalHarness({ busy = false, reducedMotion = false } = {}) {
+  const closes = []
+  const mounts = [], timers = []
+  const module = { exports: {} }
+  const source = modal.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1]
+  runInNewContext(transpile(source + `
+    export const handlers = {
+      requestClose, cancel,
+      setDialog: value => { dialog = value },
+      setCloseButton: value => { closeButton = value },
+      state: () => ({ closing, disposed, completed, reducedMotion }),
+      overflow: () => document.body.style.overflow,
+    }
+  `), {
+    exports: module.exports,
+    require(name) {
+      if (name === "svelte") return { onMount: fn => { mounts.push(fn) } }
+      if (name === "../ui") return ui
+      throw new Error(name)
+    },
+    $props: Object.assign(() => ({ title: "Targets", closeLabel: "Close", busy, onclose: () => closes.push("onclose"), children: () => ({}) }), { id: () => "modal" }),
+    $bindable: value => value,
+    $state: value => value,
+    $derived: value => value,
+    $effect: () => {},
+    document: { activeElement: null, body: { style: { overflow: "" } } },
+    window: { matchMedia: () => ({ matches: reducedMotion, addEventListener() {}, removeEventListener() {} }) },
+    HTMLElement: class {},
+    setTimeout: fn => { timers.push(fn); return timers.length },
+    clearTimeout: () => {},
+  })
+  return {
+    ...module.exports.handlers, closes,
+    mount: () => mounts.shift()(),
+    runTimers: () => { for (const fn of timers.splice(0)) fn() },
+  }
+}
+
+test("dialog shows on mount, closes through the requested path and restores page state on destroy", () => {
   const calls = []
-  const action = h.mountDialog({ showModal() { calls.push("showModal") }, close() { calls.push("close") } })
-  action.destroy()
-  assert.deepEqual(calls, ["showModal", "close"])
-  assert.match(component, /oncancel=\{closeEditor\} onclose=\{closeEditor\}/)
-  assert.match(component, /aria-label=\{m.targetsClose\} onclick=\{closeEditor\}/)
-  assert.match(component, /onclick=\{closeEditor\}>\{m.targetsCancel\}/)
-  assert.match(component, /onclick=\{applyEditor\}/)
+  const dialog = {
+    open: false,
+    showModal() { this.open = true; calls.push("showModal") },
+    close() { this.open = false; calls.push("close") },
+    focus() { calls.push("dialogFocus") },
+  }
+  const h = modalHarness()
+  h.setDialog(dialog)
+  h.setCloseButton({ focus() { calls.push("closeButtonFocus") } })
+  const cleanup = h.mount()
+  assert.deepEqual(calls, ["showModal", "closeButtonFocus"])
+  assert.equal(h.overflow(), "hidden")
+  h.requestClose() // Animated close waits for the transition timer.
+  assert.equal(dialog.open, true)
+  assert.equal(h.state().closing, true)
+  h.runTimers()
+  assert.deepEqual(calls, ["showModal", "closeButtonFocus", "close"])
+  assert.deepEqual(h.closes, ["onclose"])
+  assert.equal(h.state().completed, true)
+  cleanup()
+  assert.equal(h.overflow(), "")
+
+  const immediate = modalHarness({ reducedMotion: true })
+  const reducedDialog = { open: false, showModal() { this.open = true }, close() { this.open = false }, focus() {} }
+  immediate.setDialog(reducedDialog)
+  immediate.setCloseButton({ focus() {} })
+  const stop = immediate.mount()
+  assert.equal(immediate.state().reducedMotion, true)
+  immediate.cancel({ preventDefault() {} })
+  assert.equal(reducedDialog.open, false)
+  stop()
+  assert.equal(immediate.overflow(), "")
+
+  const blocked = modalHarness({ busy: true })
+  const busyDialog = { open: false, showModal() { this.open = true }, close() { this.open = false }, focus() {} }
+  blocked.setDialog(busyDialog)
+  blocked.setCloseButton({ focus() {} })
+  const destroy = blocked.mount()
+  blocked.requestClose() // A busy dialog must reject every close request.
+  blocked.runTimers()
+  assert.equal(blocked.state().closing, false)
+  assert.equal(busyDialog.open, true)
+  assert.deepEqual(blocked.closes, [])
+  destroy()
+  assert.equal(busyDialog.open, false)
+  assert.equal(blocked.overflow(), "")
+})
+
+test("rendered editor exposes accessible close, cancel and radio controls", async () => {
+  assert.match(modal, /oncancel=\{cancel\}/)
+  assert.match(modal, /onclick=\{requestClose\}/)
+  assert.match(modal, /aria-label=\{closeLabel\} title=\{closeLabel\} disabled=\{busy \|\| closing\} onclick=\{requestClose\}/)
+  assert.match(component, /onclose=\{closeEditor\}/)
+  assert.match(component, /disabled=\{pending\} onclick=\{requestClose\}>\{m.targetsCancel\}/)
+  assert.match(component, /onclick=\{\(\) => \{ applyEditor\(false\); requestClose\(\) \}\}/)
   assert.match(component, /type="radio" name="target-mode" value=\{mode\} bind:group=\{editor.mode\}/)
   for (const { code } of locale.supportedLanguages) {
     const body = await renderComponent(fixture(), code, { name: "com.alpha", mode: "hack", policy: {}, tracked: false })
-    assert.ok(body.includes('aria-labelledby="target-mode-title"'))
-    assert.ok(body.includes('aria-describedby="target-mode-package"'))
+    assert.match(body, /aria-labelledby="[^"]+-title"/)
+    assert.match(body, /aria-describedby="[^"]+-description"/)
     assert.ok(body.includes(locale.messages[code].targetsCancel))
     assert.ok(body.includes(locale.messages[code].targetsApply))
     for (const key of ["targetsModeAuto", "targetsModeGenerate", "targetsModeHack"]) assert.ok(body.includes(locale.messages[code][key]))
@@ -736,7 +845,7 @@ test("dirty count counts affected applications once and includes global settings
 })
 
 
-test("saved targets sort first while draft toggles never move rows until a successful save reload", async () => {
+test("the selection captured on first load keeps draft toggles and reloads from reordering rows", async () => {
   const initial = fixture()
   initial.config.targets = [{ package_name: "com.zulu", mode: "hack" }, { package_name: "com.system", mode: "auto" }]
   initial.packages.push({ package_name: "com.zulu", system: false, selected: true, mode: "hack", installed: true })
@@ -755,7 +864,7 @@ test("saved targets sort first while draft toggles never move rows until a succe
     targets: draft.targets, default_policy: draft.default_policy, per_app_policy: draft.per_app_policy,
   }, system_apps: draft.system_apps }))
   await h.save()
-  assert.deepEqual(names(), ["com.beta", "com.system", "com.alpha", "com.zulu"])
+  assert.deepEqual(names(), ["com.system", "com.zulu", "com.alpha", "com.beta"])
   await h.refresh()
   assert.equal(h.state().notice, locale.messages.en.targetsRefreshed)
 })
@@ -783,7 +892,9 @@ test("system tracking dialog applies only on confirmation and keeps selected sys
   assert.ok(h.listed().some(item => item.package_name === "com.system"))
   h.menuAction("clear")
   assert.equal(h.state().draft.targets.length, 0)
-  assert.ok(!h.listed().some(item => item.package_name === "com.system"))
+  // Clear only untargets the visible rows; the tracked system app stays listed.
+  assert.deepEqual(plain(h.state().draft.system_apps), ["com.system"])
+  assert.ok(h.listed().some(item => item.package_name === "com.system"))
 })
 
 test("menu callback, trigger exclusion, keyboard focus, outside dismissal and action closing stay consistent", async () => {

@@ -43,7 +43,7 @@ function harness({ saved, storageFails = false } = {}) {
   runInNewContext(compile(source + hooks), {
     exports: module.exports,
     require(name) {
-      if (name === "svelte") return { onMount() {} }
+      if (name === "svelte") return { onMount() {}, tick: () => Promise.resolve() }
       if (name === "./lib/i18n") return locale
       if (name === "./lib/log") return logs
       if (name === "./lib/certificateStatus") return certificateStatus
@@ -179,8 +179,14 @@ test("shared Dropdown renders native labels and one selected marker with common 
     compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext },
   }).outputText
   const uiUrl = "data:text/javascript;base64," + Buffer.from(uiSource).toString("base64")
+  // Server rendering never plays transitions; resolve the real module so its imports still parse.
+  const motionCode = ts.transpileModule(readFileSync(new URL("../src/lib/motion.ts", import.meta.url), "utf8"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext },
+  }).outputText
+  const motionUrl = "data:text/javascript;base64," + Buffer.from(motionCode.replace(/from (['"])([^'"]+)\1/g,
+    (_, quote, specifier) => "from " + quote + import.meta.resolve(specifier) + quote)).toString("base64")
   const code = js.code.replace(/from (['"])([^'"]+)\1/g,
-    (_, quote, specifier) => "from " + quote + (specifier === "../ui" ? uiUrl : import.meta.resolve(specifier)) + quote)
+    (_, quote, specifier) => "from " + quote + (specifier === "../ui" ? uiUrl : specifier === "../motion" ? motionUrl : import.meta.resolve(specifier)) + quote)
   const { default: Component } = await import("data:text/javascript;base64," + Buffer.from(code).toString("base64"))
   const { body } = render(Component, { props: {
     id: "language-options", label: locale.messages.en.language,

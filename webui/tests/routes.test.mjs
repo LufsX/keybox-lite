@@ -44,7 +44,8 @@ function harness(hash = "") {
   `), {
     exports,
     require(name) {
-      if (name === "svelte") return { onMount: fn => { mount = fn } }
+      if (name === "svelte") return { onMount: fn => { mount = fn }, tick: () => Promise.resolve() }
+      if (name === "./lib/motion") return { pageExit: () => ({ duration: 0, css: () => "" }) }
       if (modules.has(name)) return modules.get(name)
       if (name === "./lib/bridge") return { exec: () => new Promise(() => {}), enableEdgeToEdge() {} }
       return {}
@@ -55,6 +56,7 @@ function harness(hash = "") {
     localStorage: { getItem() { return null }, setItem() {} },
     window: {
       location,
+      scrollTo() {},
       matchMedia: () => media,
       addEventListener: (name, fn) => listeners.set(name, fn),
       removeEventListener(name, fn) { removed.push([name, fn]); listeners.delete(name) },
@@ -152,6 +154,7 @@ async function renderApp(hash) {
     else if (name.endsWith(".svelte")) url = empty
     else if (name === "lucide-svelte") url = icon
     else if (name === "./lib/bridge") url = 'data:text/javascript,' + encodeURIComponent('export function exec() { throw Error("unexpected I/O") } export function toast() {} export function enableEdgeToEdge() {}')
+    else if (name === "./lib/motion") url = 'data:text/javascript,' + encodeURIComponent('export function pageExit() { return {} }')
     else if (modules.has(name)) url = 'data:text/javascript;base64,' + Buffer.from(transpile(readFileSync(new URL("../src/" + name.slice(2) + ".ts", import.meta.url), "utf8"), ts.ModuleKind.ESNext)).toString("base64")
     else url = import.meta.resolve(name)
     return "from " + quote + url + quote
