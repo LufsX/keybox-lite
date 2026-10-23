@@ -1,3 +1,5 @@
+import { compareAppNames } from "./appSort"
+
 export const modes = ["auto", "generate", "hack"] as const
 export type TargetMode = typeof modes[number]
 export const policyKeys = ["os_patch", "vendor_patch", "boot_patch"] as const
@@ -103,8 +105,7 @@ export function targetSaveCommand(bin: string, revision: string, draft: TargetDr
 export function targetEntryCommand(bin: string, enabled: boolean): string {
   return shellQuote(bin) + " targets entry set " + (enabled ? "on" : "off")
 }
-export function visiblePackages(status: TargetStatus, draft: TargetDraft, query: string, filter = "listed", labels: ReadonlyMap<string, { label: string }> = new Map()): TargetPackage[] {
-  const saved = new Set(status.config.targets.map(item => item.package_name))
+export function visiblePackages(status: TargetStatus, draft: TargetDraft, query: string, filter = "listed", labels: ReadonlyMap<string, { label: string }> = new Map(), pinned?: ReadonlySet<string>): TargetPackage[] {
   const selected = new Map(draft.targets.map(item => [item.package_name, item.mode]))
   const known = new Set(status.packages.map(item => item.package_name))
   const system = new Set(draft.system_apps)
@@ -119,5 +120,5 @@ export function visiblePackages(status: TargetStatus, draft: TargetDraft, query:
   return packages.filter(item => (item.package_name.toLowerCase().includes(search) || (labels.get(item.package_name)?.label ?? "").toLowerCase().includes(search)) &&
     (filter === "listed" ? !item.system || system.has(item.package_name) || item.selected :
       filter === "all" || (filter === "selected" ? item.selected : filter === "system" ? item.system : !item.system)))
-    .sort((a, b) => Number(saved.has(b.package_name)) - Number(saved.has(a.package_name)) || a.package_name.localeCompare(b.package_name))
+    .sort((a, b) => Number(pinned?.has(b.package_name) ?? b.selected) - Number(pinned?.has(a.package_name) ?? a.selected) || compareAppNames(labels.get(a.package_name)?.label || a.package_name, labels.get(b.package_name)?.label || b.package_name) || a.package_name.localeCompare(b.package_name))
 }
