@@ -26,7 +26,7 @@ A KernelSU / APatch / Magisk module that updates the Tricky Store / TEESimulator
 ## Layout
 
     action.sh      thin Action-button entry to the Go update supervisor
-    settings.sh    thin entry to Go schedule settings
+    settings.sh    thin entry to Go settings (schedule and source)
     service.sh     thin boot entry to target maintenance and the Go scheduler
     webui.sh       standalone WebUI launcher for injected Magisk Action entries
     customize.sh   installer
@@ -107,6 +107,9 @@ output; all candidates require current time validity and a usable revocation lis
 
 The Addon URL and format match Duck’s default provider. Addon is excluded from the
 default sources; manual use requires `KBL_SOURCES="meow spectre addon" sh action.sh`.
+The saved source selection (`auto`, `meow` or `spectre`, stored in
+`/data/adb/keybox-lite/config`) applies to Action, WebUI and scheduled updates and
+defaults to `auto`; `KBL_SOURCES` overrides it for a single run.
 `KB_ACCEL` overrides the default `https://c.etc.moe/` proxy prefix; an empty value
 selects direct and built-in GitHub routes.
 Empty responses are rejected. Integration tests use generated data and mock downloads.
@@ -140,8 +143,8 @@ See [AGENTS.md](AGENTS.md) for architecture, compatibility and validation guidel
 
 Shows the installed keybox (path, size, serials, XML structural validity), each certificate’s
 valid-from / expiry dates and time-validity status, one-tap update and certificate checking,
-an auto-update schedule (off / daily / weekly) and the module's update
-records. The TS / TS-L targets panel provides app search, user/system filters, manual
+an auto-update schedule (off / daily / weekly), a keybox source selector
+(automatic / Meow / Spectre) and the module's update records. The TS / TS-L targets panel provides app search, user/system filters, manual
 package or UID entries, auto / generate / hack modes, global patch policies and
 per-app policies on modern TS. Saves preserve unknown backend configuration and
 reject stale revisions. Automatic target additions run at boot and apply only to

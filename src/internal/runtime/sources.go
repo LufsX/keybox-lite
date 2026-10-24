@@ -22,7 +22,7 @@ type sourceState struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	revoked atomic.Bool
-	wg      sync.WaitGroup
+	claim   func(routeJob) bool
 }
 type routeResult struct {
 	job  routeJob
@@ -31,16 +31,7 @@ type routeResult struct {
 
 func (e *engine) jobs() []routeJob {
 	var jobs []routeJob
-	for _, source := range []string{"meow", "spectre", "addon"} {
-		enabled := false
-		for _, s := range e.sources {
-			if source == s {
-				enabled = true
-			}
-		}
-		if !enabled {
-			continue
-		}
+	for _, source := range e.sources {
 		jobs = append(jobs, routeJob{source, "direct", ""})
 		seen := map[string]bool{"": true, "https://gh-proxy.com/": true}
 		for _, prefix := range strings.Fields(e.accel) {
@@ -63,6 +54,11 @@ func (e *engine) candidate(ctx context.Context, j routeJob, s *sourceState, url,
 	raw, err := e.download(ctx, j, url, dir)
 	if err != nil {
 		return nil, err
+	}
+	// Catalog downloads never claim the race. Stop sibling routes as soon as
+	// a complete keybox response arrives, before decoding or validation.
+	if ctx.Err() != nil || !s.claim(j) {
+		return nil, fmt.Errorf("route stopped")
 	}
 	var decoded bytes.Buffer
 	switch j.source {
@@ -151,79 +147,96 @@ func (e *engine) fetch(ctx context.Context, j routeJob, s *sourceState, work, ki
 	return nil
 }
 func (e *engine) race(ctx context.Context, work, kind string) (routeResult, error) {
-	parent := ctx
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	states := map[string]*sourceState{}
 	jobs := e.jobs()
-	for _, j := range jobs {
-		if states[j.source] == nil {
-			c, stop := context.WithCancel(ctx)
-			states[j.source] = &sourceState{ctx: c, cancel: stop}
+	for len(jobs) > 0 {
+		if err := ctx.Err(); err != nil {
+			return routeResult{}, err
 		}
+		end := 1
+		for end < len(jobs) && jobs[end].source == jobs[0].source {
+			end++
+		}
+		r := e.raceSource(ctx, jobs[:end], work, kind)
+		if err := ctx.Err(); err != nil {
+			return routeResult{}, err
+		}
+		if len(r.data) > 0 {
+			return r, nil
+		}
+		jobs = jobs[end:]
 	}
-	defer func() {
-		for _, s := range states {
-			s.cancel()
+	return routeResult{}, fmt.Errorf("all sources failed (network, backend compatibility or certificate checks); old keybox retained")
+}
+
+// raceSource joins every route before accepting data or starting the next source.
+func (e *engine) raceSource(ctx context.Context, jobs []routeJob, work, kind string) routeResult {
+	if len(jobs) == 0 || ctx.Err() != nil {
+		return routeResult{}
+	}
+	sourceCtx, stop := context.WithCancel(ctx)
+	s := &sourceState{ctx: sourceCtx, cancel: stop}
+	contexts := make([]context.Context, len(jobs))
+	cancels := make([]context.CancelFunc, len(jobs))
+	for i := range jobs {
+		contexts[i], cancels[i] = context.WithCancel(sourceCtx)
+	}
+	var mu sync.Mutex
+	winner := -1
+	s.claim = func(j routeJob) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if sourceCtx.Err() != nil {
+			return false
 		}
-	}()
-	results := make(chan routeResult, len(jobs))
-	// A semaphore bounds active routes, including queued manually enabled Addon.
+		if winner >= 0 {
+			return jobs[winner] == j
+		}
+		for i := range jobs {
+			if jobs[i] == j {
+				winner = i
+				break
+			}
+		}
+		for i, cancel := range cancels {
+			if i != winner {
+				cancel()
+			}
+		}
+		return true
+	}
+	results := make([]routeResult, len(jobs))
 	sem := make(chan struct{}, 6)
-	var all sync.WaitGroup
-	for _, j := range jobs {
-		s := states[j.source]
-		s.wg.Add(1)
-		all.Add(1)
-		go func(j routeJob, s *sourceState) {
-			defer all.Done()
-			defer s.wg.Done()
+	var wg sync.WaitGroup
+	for i, j := range jobs {
+		wg.Add(1)
+		go func(i int, j routeJob) {
+			defer wg.Done()
+			routeCtx := contexts[i]
 			select {
 			case sem <- struct{}{}:
-			case <-s.ctx.Done():
-				results <- routeResult{job: j}
+			case <-routeCtx.Done():
 				return
 			}
 			defer func() { <-sem }()
-			var data []byte
-			if s.ctx.Err() == nil {
+			if routeCtx.Err() == nil {
 				e.say("[%s / %s] [FETCH] Starting", j.source, j.route)
-				data = e.fetch(s.ctx, j, s, work, kind)
+				results[i] = routeResult{job: j, data: e.fetch(routeCtx, j, s, work, kind)}
 			}
-			results <- routeResult{job: j, data: data}
-		}(j, s)
+		}(i, j)
 	}
-	// Keep other sources' accepted results while stopping all sibling routes.
-	// Wait establishes that every completed Verify exit 1 has been collected.
-	var accepted []routeResult
-	remaining := len(jobs)
-	for remaining > 0 {
-		r := <-results
-		remaining--
-		if len(r.data) > 0 {
-			accepted = append(accepted, r)
-		}
-		for len(accepted) > 0 {
-			candidate := accepted[0]
-			accepted = accepted[1:]
-			s := states[candidate.job.source]
-			if s.revoked.Load() {
-				continue
-			}
-			s.cancel()
-			s.wg.Wait()
-			if s.revoked.Load() {
-				continue
-			}
-			cancel()
-			all.Wait()
-			if parent.Err() != nil {
-				return routeResult{}, parent.Err()
-			}
-			// Parent cancellation also blocks publication.
-			return candidate, nil
-		}
+	wg.Wait()
+	for _, cancel := range cancels {
+		cancel()
 	}
-	all.Wait()
-	return routeResult{}, fmt.Errorf("all sources failed (network, backend compatibility or certificate checks); old keybox retained")
+	stop()
+	if ctx.Err() != nil || s.revoked.Load() {
+		return routeResult{}
+	}
+	if winner < 0 {
+		return routeResult{}
+	}
+	if len(results[winner].data) > 0 {
+		return results[winner]
+	}
+	return routeResult{}
 }

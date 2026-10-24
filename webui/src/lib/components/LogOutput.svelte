@@ -25,7 +25,7 @@
 </script>
 
 <section class={ui.panel}>
-  <div class="mb-2 flex min-h-8 flex-wrap items-center justify-between gap-x-2 gap-y-1">
+  <div class="mb-3 flex min-h-8 flex-wrap items-center justify-between gap-x-2 gap-y-1">
     <h2 class="grid min-w-0 max-w-full flex-[1_1_12rem] grid-cols-[17px_minmax(0,1fr)] items-start gap-1.5 text-sm font-semibold [&_svg]:mt-0.5 [&_svg]:text-[var(--muted)]">
       <Terminal size={17} /><span class="min-w-0 [overflow-wrap:anywhere]">{title}</span>
     </h2>

@@ -37,6 +37,7 @@ func TestStandaloneShellEntrypoints(t *testing.T) {
 				{"action.sh", []string{"--managed"}, []string{"update", module}},
 				{"settings.sh", []string{"get"}, []string{"settings", module, "get"}},
 				{"settings.sh", []string{"set", "weekly"}, []string{"settings", module, "set", "weekly"}},
+				{"settings.sh", []string{"source", "spectre"}, []string{"settings", module, "source", "spectre"}},
 				{"service.sh", nil, []string{"service", module}},
 				{"service.sh", []string{"--worker"}, []string{"service", module, "--worker"}},
 				{"uninstall.sh", nil, []string{"uninstall", module}},

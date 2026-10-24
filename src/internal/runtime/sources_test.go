@@ -91,25 +91,23 @@ func TestSourcesAddonExplicitAndIsolation(t *testing.T) {
 	e := fixture(t)
 	e.sources = []string{"meow", "addon"}
 	encoded := hex.EncodeToString([]byte(base64.StdEncoding.EncodeToString([]byte("ADDON"))))
-	setResponses(t, e, map[string]response{e.addon: {Body: encoded}, e.meow: {Body: meowEncode("MEOW")}})
+	setResponses(t, e, map[string]response{
+		e.meow:                            {Body: meowEncode("MEOW")},
+		e.addon:                           {Body: encoded},
+		"https://gh-proxy.com/" + e.addon: {Body: encoded},
+	})
 	var mu sync.Mutex
 	dirs := map[string]bool{}
-	entered := make(chan struct{}, 2)
-	release := make(chan struct{})
 	e.d.prepare = func(_ context.Context, _ string, b []byte, dir string) ([]byte, error) {
 		mu.Lock()
+		defer mu.Unlock()
 		dirs[dir] = true
-		mu.Unlock()
-		entered <- struct{}{}
-		<-release
+		if len(dirs) == 1 {
+			return nil, fmt.Errorf("incompatible")
+		}
 		return b, nil
 	}
-	done := make(chan error, 1)
-	go func() { done <- e.update(context.Background()) }()
-	<-entered
-	<-entered
-	close(release)
-	if err := <-done; err != nil {
+	if err := e.update(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(dirs) < 2 {
@@ -140,55 +138,228 @@ func TestSourcesDownloaderFallback(t *testing.T) {
 		})
 	}
 }
-func TestSourceRaceRevocationDuringShutdown(t *testing.T) {
-	for _, spectreDelay := range []int{0, 100} {
-		t.Run(fmt.Sprint(spectreDelay), func(t *testing.T) {
+func waitSourceCondition(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal("source condition timed out")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func sourceProcessStopped(pid string) bool {
+	raw, err := os.ReadFile("/proc/" + pid + "/stat")
+	return os.IsNotExist(err) || (err == nil && strings.Contains(string(raw), ") Z "))
+}
+
+func TestSourceRaceDownloadCompletionCancelsBeforeValidation(t *testing.T) {
+	for _, mode := range []string{"prepare", "verify", "incompatible", "verify-2", "verify-3", "revoked"} {
+		t.Run(mode, func(t *testing.T) {
 			e := fixture(t)
 			e.sources = []string{"meow", "spectre"}
-			e.accel = "https://c.etc.moe/"
-			setResponses(t, e, map[string]response{
-				e.meow:             {Body: meowEncode("MEOW-GOOD")},
-				e.accel + e.meow:   {Body: meowEncode("MEOW-REVOKED")},
+			e.accel = "https://one/"
+			first := meowEncode("FIRST")
+			responses := map[string]response{
+				e.meow:             {Body: first, Gate: "winner-release"},
+				e.accel + e.meow:   {Body: meowEncode("SECOND"), Child: true, Gate: "sibling-release"},
 				e.catalog:          {Body: `{"entries":[{"source":"good","version":"1"}]}`},
-				e.base + "/good/1": {Body: spectreEncode("SPECTRE"), Delay: spectreDelay},
-			})
-			revokedEntered := make(chan struct{})
-			var once sync.Once
+				e.base + "/good/1": {Body: spectreEncode("FALLBACK")},
+			}
+			setResponses(t, e, responses)
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			var pid string
+			pidReady := make(chan struct{})
+			var prepared, checked []string
+			stopped := func() {
+				t.Helper()
+				<-pidReady
+				waitSourceCondition(t, func() bool { return sourceProcessStopped(pid) })
+			}
+			e.d.prepare = func(ctx context.Context, _ string, b []byte, _ string) ([]byte, error) {
+				prepared = append(prepared, string(b))
+				if string(b) == "FIRST" && (mode == "prepare" || mode == "incompatible") {
+					stopped()
+					if ctx.Err() != nil {
+						t.Error("winner canceled with its sibling")
+					}
+					if mode == "incompatible" {
+						return nil, fmt.Errorf("incompatible")
+					}
+				}
+				return b, nil
+			}
 			e.d.verify = func(ctx context.Context, file, _ string, _ io.Writer) int {
 				b := read(t, file)
-				if b == "MEOW-REVOKED" {
-					once.Do(func() { close(revokedEntered) })
-					<-ctx.Done()
+				checked = append(checked, b)
+				if b != "FIRST" {
+					return 0
+				}
+				stopped()
+				if ctx.Err() != nil {
+					t.Error("winner verification canceled with its sibling")
+				}
+				switch mode {
+				case "verify-2":
+					return 2
+				case "verify-3":
+					return 3
+				case "revoked":
 					return 1
 				}
-				if b == "MEOW-GOOD" {
+				return 0
+			}
+			done := make(chan error, 1)
+			// Start the slower downloader first, then let the direct route finish.
+			go func() { done <- e.update(ctx) }()
+			waitSourceCondition(t, func() bool { return exists(filepath.Join(e.p.root, "child")) })
+			pid = strings.TrimSpace(read(t, filepath.Join(e.p.root, "child")))
+			close(pidReady)
+			mustWrite(t, filepath.Join(e.p.root, "winner-release"), nil)
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if !sourceProcessStopped(pid) {
+				t.Fatal("returned before losing downloader stopped")
+			}
+			log := read(t, filepath.Join(e.p.tmp, "keybox-update.log"))
+			if strings.Count(log, "[meow / one] [FETCH] Starting") != 1 {
+				t.Fatal("canceled route started more than once")
+			}
+			if strings.Contains(log, "context canceled; trying another downloader") {
+				t.Fatal("normal cancellation logged as a download failure")
+			}
+			want := "FIRST"
+			switch mode {
+			case "incompatible", "verify-2", "verify-3", "revoked":
+				want = "FALLBACK"
+			}
+			if strings.Contains(strings.Join(prepared, ","), "SECOND") {
+				t.Fatal("restarted a canceled route")
+			}
+			if got := read(t, e.host("/data/adb/tricky_store/keybox.xml")); got != want {
+				t.Fatalf("installed %q, want %q (prepared %v, checked %v)", got, want, prepared, checked)
+			}
+			clean(t, e)
+		})
+	}
+}
+
+func TestSourceRaceCatalogCompletionDoesNotCancelKeyboxDownloads(t *testing.T) {
+	e := fixture(t)
+	e.sources = []string{"spectre"}
+	e.accel = "https://one/"
+	catalog := `{"entries":[{"source":"good","version":"1"}]}`
+	setResponses(t, e, map[string]response{
+		e.catalog:                    {Body: catalog},
+		e.base + "/good/1":           {Body: spectreEncode("DIRECT"), Child: true, Gate: "never-release"},
+		e.accel + e.catalog:          {Body: catalog, Gate: "catalog-release"},
+		e.accel + e.base + "/good/1": {Body: spectreEncode("PROXY")},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- e.update(ctx) }()
+	waitSourceCondition(t, func() bool { return exists(filepath.Join(e.p.root, "child")) })
+	pid := strings.TrimSpace(read(t, filepath.Join(e.p.root, "child")))
+	mustWrite(t, filepath.Join(e.p.root, "catalog-release"), nil)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, e.host("/data/adb/tricky_store/keybox.xml")); got != "PROXY" {
+		t.Fatalf("installed %q after direct catalog completed first", got)
+	}
+	if !sourceProcessStopped(pid) {
+		t.Fatal("losing keybox downloader survived")
+	}
+	clean(t, e)
+}
+
+func TestSourceRaceConfiguredOrderAndFallback(t *testing.T) {
+	for _, first := range []string{"meow", "spectre"} {
+		for _, succeeds := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/success=%t", first, succeeds), func(t *testing.T) {
+				e := fixture(t)
+				second := "spectre"
+				if first == "spectre" {
+					second = "meow"
+				}
+				var err error
+				e.sources, err = parseSources(first + " " + second + " " + first)
+				if err != nil {
+					t.Fatal(err)
+				}
+				e.accel = "https://one/"
+				payloads := map[string]string{first: "FIRST", second: "SECOND"}
+				responses := map[string]response{}
+				for _, j := range e.jobs() {
+					if j.source == "meow" {
+						responses[j.prefix+e.meow] = response{Body: meowEncode(payloads[j.source])}
+					} else {
+						responses[j.prefix+e.catalog] = response{Body: `{"entries":[{"source":"good","version":"1"}]}`}
+						responses[j.prefix+e.base+"/good/1"] = response{Body: spectreEncode(payloads[j.source])}
+					}
+				}
+				setResponses(t, e, responses)
+				entered := make(chan struct{}, len(e.jobs()))
+				release := make(chan struct{})
+				e.d.verify = func(ctx context.Context, file, _ string, _ io.Writer) int {
+					if read(t, file) != "FIRST" {
+						return 0
+					}
+					entered <- struct{}{}
 					select {
-					case <-revokedEntered:
+					case <-release:
+						if succeeds {
+							return 0
+						}
+						return 2
 					case <-ctx.Done():
 						return 2
 					}
 				}
-				return 0
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			if err := e.update(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if read(t, e.host("/data/adb/tricky_store/keybox.xml")) != "SPECTRE" {
-				t.Fatal("revoked source won shutdown race")
-			}
-			if !strings.Contains(read(t, filepath.Join(e.p.tmp, "keybox-update.history")), "spectre") {
-				t.Fatal("wrong source history")
-			}
-		})
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- e.update(ctx) }()
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					t.Fatal("first source did not reach verification")
+				}
+				secondURL := e.catalog
+				if second == "meow" {
+					secondURL = e.meow
+				}
+				if strings.Contains(read(t, filepath.Join(e.p.root, "requests")), secondURL) {
+					t.Fatal("second source started before first source completed")
+				}
+				close(release)
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				want := "SECOND"
+				if succeeds {
+					want = "FIRST"
+					if strings.Contains(read(t, filepath.Join(e.p.root, "requests")), secondURL) {
+						t.Fatal("second source started despite first-source success")
+					}
+				}
+				if got := read(t, e.host("/data/adb/tricky_store/keybox.xml")); got != want {
+					t.Fatalf("installed %q, want %q", got, want)
+				}
+			})
+		}
 	}
 }
+
 func TestSourceRaceWorkerLimitAndQueue(t *testing.T) {
 	e := fixture(t)
 	e.sources = []string{"meow", "spectre", "addon"}
-	e.accel = "https://one/ https://two/"
-	// Block the initial six routes so queued workers cannot hide an exceeded limit.
+	e.accel = "https://one/ https://two/ https://three/ https://four/ https://five/ https://six/"
+	// Queue routes within the first source and block the initial six workers.
 	setResponses(t, e, map[string]response{})
 	e.d.prepare = func(context.Context, string, []byte, string) ([]byte, error) { return nil, fmt.Errorf("no") }
 	var responses = map[string]response{}
@@ -200,7 +371,7 @@ func TestSourceRaceWorkerLimitAndQueue(t *testing.T) {
 		if j.source == "spectre" {
 			url = e.catalog
 		}
-		responses[j.prefix+url] = response{Body: "invalid", Gate: "release"}
+		responses[j.prefix+url] = response{Body: "invalid", Code: 22, Gate: "release"}
 	}
 	setResponses(t, e, responses)
 	e.tools = e.tools[:1]

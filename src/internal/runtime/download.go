@@ -65,6 +65,9 @@ func (e *engine) download(ctx context.Context, j routeJob, url, dir string) ([]b
 			err = child.Err()
 		}
 		cancel()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if err == nil && body.Len() > 0 {
 			return body.Bytes(), nil
 		}

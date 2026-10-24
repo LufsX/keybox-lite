@@ -111,7 +111,7 @@ func TestRuntimeHelper(t *testing.T) {
 		e := production(args[1])
 		e.p.root = dir
 		e.p.state = filepath.Join(dir, "data/adb/keybox-lite")
-		e.p.conf = filepath.Join(dir, "data/adb/keybox-lite.conf")
+		e.p.conf = filepath.Join(dir, "data/adb/keybox-lite/config")
 		e.p.tmp = filepath.Join(dir, "tmp")
 		e.maintenancePoll = 10 * time.Millisecond
 		e.maintenanceBudget = 5 * time.Second
@@ -125,7 +125,7 @@ func TestRuntimeHelper(t *testing.T) {
 		e := production(args[1])
 		e.p.root = dir
 		e.p.state = filepath.Join(dir, "data/adb/keybox-lite")
-		e.p.conf = filepath.Join(dir, "data/adb/keybox-lite.conf")
+		e.p.conf = filepath.Join(dir, "data/adb/keybox-lite/config")
 		e.p.tmp = filepath.Join(dir, "tmp")
 		e.p.bin = filepath.Join(dir, "keyboxlite")
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
@@ -177,7 +177,7 @@ func fixture(t *testing.T) *engine {
 	t.Helper()
 	root := t.TempDir()
 	e := production(filepath.Join(root, "module"))
-	e.p = paths{root: root, module: filepath.Join(root, "module"), state: filepath.Join(root, "data/adb/keybox-lite"), conf: filepath.Join(root, "data/adb/keybox-lite.conf"), tmp: filepath.Join(root, "tmp")}
+	e.p = paths{root: root, module: filepath.Join(root, "module"), state: filepath.Join(root, "data/adb/keybox-lite"), conf: filepath.Join(root, "data/adb/keybox-lite/config"), tmp: filepath.Join(root, "tmp")}
 	os.MkdirAll(e.p.module, 0700)
 	os.MkdirAll(e.p.tmp, 0700)
 	e.out = &bytes.Buffer{}
@@ -364,7 +364,7 @@ func TestRuntimeConfiguration(t *testing.T) {
 	t.Setenv("KB_ACCEL", "https://one/ https://two/")
 	t.Setenv("KBL_TEST_ROOT", t.TempDir())
 	e := production("/module")
-	if e.p.root != "/" || e.p.state != "/data/adb/keybox-lite" || len(e.sources) != 3 || len(e.jobs()) != 11 {
+	if e.p.root != "/" || e.p.state != "/data/adb/keybox-lite" || e.p.conf != "/data/adb/keybox-lite/config" || len(e.sources) != 3 || len(e.jobs()) != 11 {
 		t.Fatalf("configuration: %+v jobs %d", e.p, len(e.jobs()))
 	}
 	for _, j := range e.jobs() {
@@ -377,7 +377,7 @@ func TestRuntimeConfiguration(t *testing.T) {
 			t.Fatalf("accepted %q", value)
 		}
 	}
-	for _, args := range [][]string{{"update", "/module", "--root", "/tmp"}, {"settings", "/module", "set", "hourly"}, {"service", "/module", "bad"}} {
+	for _, args := range [][]string{{"update", "/module", "--root", "/tmp"}, {"settings", "/module", "set", "hourly"}, {"settings", "/module", "source", "addon"}, {"service", "/module", "bad"}} {
 		if Run(args) != 2 {
 			t.Fatal("accepted invalid CLI")
 		}
@@ -421,14 +421,76 @@ func TestRuntimeSettingsAtomic(t *testing.T) {
 		t.Fatal("failed write changed settings")
 	}
 	matches, _ := filepath.Glob(e.p.conf + ".*")
-	if len(matches) != 0 {
-		t.Fatal("temporary settings leaked")
+	for _, m := range matches {
+		if filepath.Base(m) != "config.lock" {
+			t.Fatalf("temporary settings leaked: %s", m)
+		}
 	}
 	e.d.rename = os.Rename
 	os.Remove(e.p.conf)
 	os.Symlink(filepath.Join(e.p.root, "other"), e.p.conf)
 	if _, err = e.readConfig(); err == nil {
 		t.Fatal("config symlink accepted")
+	}
+}
+func TestRuntimeConfigSourceMigration(t *testing.T) {
+	e := fixture(t)
+	e.init()
+	mustWrite(t, e.legacyConf(), []byte("SCHEDULE=daily\nLAST_RUN=5\nSOURCE=meow\n"))
+	c, err := e.readConfig()
+	if err != nil || c.schedule != "daily" || c.last != 5 || c.source != "meow" {
+		t.Fatalf("legacy config %+v %v", c, err)
+	}
+	if err := e.settings(context.Background(), []string{"source", "spectre"}); err != nil {
+		t.Fatal(err)
+	}
+	if exists(e.legacyConf()) {
+		t.Fatal("legacy config retained")
+	}
+	if c, err = e.readConfig(); err != nil || c.source != "spectre" {
+		t.Fatalf("migrated config %+v %v", c, err)
+	}
+}
+func TestRuntimeSettingsSource(t *testing.T) {
+	e := fixture(t)
+	e.init()
+	e.out = &bytes.Buffer{}
+	if err := e.settings(context.Background(), []string{"source", "spectre"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.out.(*bytes.Buffer).String(); got != "SOURCE=spectre\n" {
+		t.Fatalf("source output %q", got)
+	}
+	e.out = &bytes.Buffer{}
+	if err := e.settings(context.Background(), []string{"get"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(e.out.(*bytes.Buffer).String(), "SOURCE=spectre") {
+		t.Fatal("get did not report source")
+	}
+	if err := e.settings(context.Background(), []string{"set", "daily"}); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := e.readConfig(); err != nil || c.source != "spectre" || c.schedule != "daily" {
+		t.Fatalf("combined settings %+v %v", c, err)
+	}
+}
+func TestRuntimeConfiguredSourceUsed(t *testing.T) {
+	e := fixture(t)
+	e.init()
+	e.sources = nil
+	if err := e.writeConfig(config{schedule: "off", source: "meow"}); err != nil {
+		t.Fatal(err)
+	}
+	setResponses(t, e, map[string]response{e.meow: {Body: meowEncode("GOOD")}})
+	if err := e.update(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(read(t, filepath.Join(e.p.root, "requests")), e.catalog) {
+		t.Fatal("configured source ignored")
+	}
+	if got := read(t, e.host("/data/adb/tricky_store/keybox.xml")); got != "GOOD" {
+		t.Fatalf("installed %q", got)
 	}
 }
 func TestRuntimeLocks(t *testing.T) {
@@ -496,17 +558,17 @@ func TestRuntimeScheduleAndUninstall(t *testing.T) {
 	if err := e.service(context.Background(), false); err != nil || boot != 1 {
 		t.Fatalf("off schedule skipped Boot: %v %d", err, boot)
 	}
-	e.writeConfig(config{"daily", 0})
+	e.writeConfig(config{"daily", 0, "auto"})
 	e.d.update = func(context.Context) error { return fmt.Errorf("failed") }
-	if err := e.tick(context.Background(), config{"daily", 0}); err != nil {
+	if err := e.tick(context.Background(), config{"daily", 0, "auto"}); err != nil {
 		t.Fatal(err)
 	}
 	c, _ := e.readConfig()
 	if c.last != 0 {
 		t.Fatal("failure advanced timestamp")
 	}
-	e.d.update = func(context.Context) error { return e.writeConfig(config{"weekly", 0}) }
-	if err := e.tick(context.Background(), config{"daily", 0}); err != nil {
+	e.d.update = func(context.Context) error { return e.writeConfig(config{"weekly", 0, "auto"}) }
+	if err := e.tick(context.Background(), config{"daily", 0, "auto"}); err != nil {
 		t.Fatal(err)
 	}
 	c, _ = e.readConfig()
@@ -519,7 +581,7 @@ func TestRuntimeScheduleAndUninstall(t *testing.T) {
 	if called != 0 {
 		t.Fatal("not due schedule ran")
 	}
-	e.tick(context.Background(), config{"daily", e.d.now().Unix() + 100})
+	e.tick(context.Background(), config{"daily", e.d.now().Unix() + 100, "auto"})
 	if called != 1 {
 		t.Fatal("future timestamp suppressed update")
 	}
@@ -565,7 +627,7 @@ func TestRuntimeUninstallWaitsWriter(t *testing.T) {
 func TestRuntimeSchedulerSingleton(t *testing.T) {
 	e := fixture(t)
 	e.init()
-	e.writeConfig(config{"daily", e.d.now().Unix()})
+	e.writeConfig(config{"daily", e.d.now().Unix(), "auto"})
 	f, _ := lock(context.Background(), filepath.Join(e.p.state, "scheduler.lock"), 0)
 	if err := e.service(context.Background(), true); err != nil {
 		t.Fatal(err)

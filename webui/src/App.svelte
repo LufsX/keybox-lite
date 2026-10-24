@@ -4,10 +4,10 @@
   import { fade } from "svelte/transition"
   import {
     RefreshCw, Loader2, ShieldCheck, ShieldAlert, ShieldQuestion,
-    Languages, HardDrive, Download, ArrowLeft, ChevronRight, EllipsisVertical,
+    Languages, HardDrive, Download, ArrowLeft, ChevronDown, ChevronRight, EllipsisVertical,
     CalendarClock, History, Monitor, Sun, Moon, Square, ListChecks
   } from "lucide-svelte"
-  import { exec, toast, enableEdgeToEdge, type ExecResult } from "./lib/bridge"
+  import { exec, execUpdate, toast, enableEdgeToEdge, type ExecResult } from "./lib/bridge"
   import { messages, detect, isLocale, supportedLanguages, type Locale } from "./lib/i18n"
   import { LogBuffer, stripAnsi, type LogLine } from "./lib/log"
   import Dropdown from "./lib/components/Dropdown.svelte"
@@ -36,6 +36,7 @@
     }
     themeOpen = false
     languageOpen = false
+    sourceOpen = false
   }
   function returnHome(event: MouseEvent) {
     event.preventDefault()
@@ -69,11 +70,17 @@
   const languageOptions = supportedLanguages.map(({ code, nativeLabel }) => ({ value: code, label: nativeLabel, lang: code }))
   function toggleTheme(open = !themeOpen) {
     themeOpen = open
-    if (open) languageOpen = false
+    if (open) {
+      languageOpen = false
+      sourceOpen = false
+    }
   }
   function toggleLanguage(open = !languageOpen) {
     languageOpen = open
-    if (open) themeOpen = false
+    if (open) {
+      themeOpen = false
+      sourceOpen = false
+    }
   }
   function setLanguage(value: Locale) {
     lang = value
@@ -107,6 +114,29 @@
   const UPDATE_TIMEOUT = 75 * 60_000
   type Busy = "update" | "check" | "refresh" | "settings" | "log"
   type Schedule = "off" | "daily" | "weekly"
+  type KeyboxSource = "auto" | "meow" | "spectre"
+  const keyboxSources: KeyboxSource[] = ["auto", "meow", "spectre"]
+  let keyboxSource = $state<KeyboxSource>("auto")
+  let sourceOpen = $state(false)
+  const sourceOptions = $derived(keyboxSources.map(value => ({
+    value, label: value === "auto" ? m.sourceAuto : value === "meow" ? "Meow" : "Spectre",
+  })))
+  function toggleSource(open: boolean) {
+    sourceOpen = open
+    if (open) {
+      themeOpen = false
+      languageOpen = false
+    }
+  }
+  async function setSource(value: string) {
+    if (busy !== null || !moddir || !keyboxSources.includes(value as KeyboxSource)) return
+    await run("settings", async () => {
+      const r = await exec('sh "' + moddir + '/settings.sh" source ' + value)
+      requireSuccess(r, m.settingsFailed)
+      await loadMeta()
+      if (keyboxSource !== value) throw new Error(m.settingsFailed)
+    })
+  }
   interface KeyboxInfo {
     path: string
     exists: boolean
@@ -140,6 +170,8 @@
   let cancelling = $state(false)
   let cancelRequested = $state(false)
   let updateRunning = $state(false)
+  let updateMonitor: AbortController | undefined
+  let updateStop: (() => Promise<ExecResult>) | undefined
   let stopPending: Promise<void> | undefined
   let outputTimer: ReturnType<typeof setTimeout> | undefined
   let pendingOutput = ""
@@ -196,6 +228,7 @@
   async function run(kind: Busy, task: () => Promise<void>) {
     if (busy !== null) return
     busy = kind
+    sourceOpen = false
     error = ""
     try {
       await task()
@@ -288,11 +321,13 @@
     requireSuccess(s, m.settingsFailed)
     const next = kv(s.stdout, "SCHEDULE")
     const last = Number(kv(s.stdout, "LAST_RUN"))
-    if (!schedules.includes(next as Schedule) || !Number.isFinite(last) || last < 0) {
+    const src = kv(s.stdout, "SOURCE") || "auto"
+    if (!schedules.includes(next as Schedule) || !Number.isFinite(last) || last < 0 || !keyboxSources.includes(src as KeyboxSource)) {
       throw new Error(m.settingsFailed)
     }
     schedule = next as Schedule
     lastRun = last
+    keyboxSource = src as KeyboxSource
     const rec = await exec(
       'grep \'^version=\' "' + moddir + '/module.prop" || exit $?; echo \'---\'; ' +
       'if [ -f /data/local/tmp/keybox-update.history ]; then tail -n 20 /data/local/tmp/keybox-update.history; fi'
@@ -346,14 +381,20 @@
       setOutput("")
       clearCertificateCheck()
       cancelRequested = false
-      updateRunning = true
+      updateMonitor = new AbortController()
       try {
-        const r = await exec('sh "' + moddir + '/action.sh"', appendOutput, UPDATE_TIMEOUT)
+        const r = await execUpdate('"' + bin + '" run-update "' + moddir + '/action.sh" /data/adb/keybox-lite', (text) => {
+          if (!disposed) setOutput(stripAnsi(text))
+        }, UPDATE_TIMEOUT, updateMonitor.signal, (stop) => {
+          updateStop = stop
+          updateRunning = !disposed
+        })
         updateRunning = false
         await stopPending
+        if (disposed) return
         flushOutput()
         const stopped = !r.failure && r.errno === 130 && cancelRequested
-        if (r.errno !== 0 && !stopped) error = failure(r, m.updateFailed)
+        if (r.errno !== 0 && !stopped) error = [error, failure(r, m.updateFailed)].filter(Boolean).join("\n")
         toast(r.errno === 0 ? m.updateSuccess : stopped ? m.updateStopped : m.updateFailed, r.errno === 0 || stopped ? "ok" : "err")
         await reload()
       } finally {
@@ -361,22 +402,25 @@
         cancelling = false
         cancelRequested = false
         stopPending = undefined
+        updateStop = undefined
+        updateMonitor = undefined
         flushOutput()
       }
     })
   }
 
   function stopUpdate() {
-    if (!bin || !updateRunning || cancelling || cancelRequested) return
+    if (!updateStop || !updateRunning || cancelling || cancelRequested) return
+    const stop = updateStop
     cancelling = true
-    error = ""
     stopPending = (async () => {
       try {
-        const r = await exec('"' + bin + '" cancel-update /data/adb/keybox-lite', appendOutput)
+        const r = await stop()
+        if (disposed) return
         requireSuccess(r, m.stopFailed)
         cancelRequested = true
       } catch (e) {
-        error = e instanceof Error ? e.message : String(e)
+        if (!disposed) error = [error, e instanceof Error ? e.message : String(e)].filter(Boolean).join("\n")
       } finally {
         cancelling = false
         flushOutput()
@@ -481,6 +525,7 @@
     void refresh()
     return () => {
       disposed = true
+      updateMonitor?.abort()
       window.removeEventListener("hashchange", syncRoute)
       clearTimeout(outputTimer)
       outputTimer = undefined
@@ -523,9 +568,9 @@
     <Toast message={error} active={!targetsPage} closeLabel={m.targetsClose} onclose={() => error = ""} />
 
     {#if targetsPage}
-      <TargetManager {bin} {lang} disabled={busy !== null || !moddir} bind:this={targetManager} onMenuChange={(open) => targetMenuOpen = open} onTitleVisibility={(visible) => targetTitleVisible = visible} />
+      <TargetManager {bin} {lang} disabled={!moddir} bind:this={targetManager} onMenuChange={(open) => targetMenuOpen = open} onTitleVisibility={(visible) => targetTitleVisible = visible} />
     {:else}
-    <div class="page-enter" out:pageExit>
+    <div class="page-enter grid min-w-0 gap-3" out:pageExit>
     <section class="{ui.panel} relative" aria-busy={!initialDone || busy === "refresh"}>
       <div class="{ui.heading}">
         <h2 class={ui.headingTitle}><HardDrive size={17} />{m.installed}</h2>
@@ -567,7 +612,7 @@
               <div class="grid grid-cols-2 gap-1.5">
                 <div class="flex min-w-0 flex-col gap-1 rounded-[9px] bg-[var(--inset)] p-2">
                   <span class="text-[11px] leading-snug text-[var(--muted)]">{m.validity}</span>
-                  <span class={statusValue + (info.validity?.status === "valid" ? " text-[var(--accent)]" : info.validity?.status === "expired" || info.validity?.status === "not_yet_valid" ? " text-[var(--red)]" : "")}>{validityLabel(info.validity?.status)}</span>
+                  <span class={statusValue + (info.validity?.status === "valid" ? " text-[var(--success)]" : info.validity?.status === "expired" || info.validity?.status === "not_yet_valid" ? " text-[var(--warning)]" : "")}>{validityLabel(info.validity?.status)}</span>
                 </div>
                 <div class="flex min-w-0 flex-col gap-1 rounded-[9px] bg-[var(--inset)] p-2" aria-live="polite">
                   <span class="text-[11px] leading-snug text-[var(--muted)]">{m.revocationStatus}</span>
@@ -585,8 +630,28 @@
       </div>
     </section>
 
-    <div class="my-2 grid grid-cols-2 {ui.buttonGroup}">
-      <button class={ui.button + " col-span-full " + (busy === "update" ? "bg-[var(--red-bg)] text-[var(--red)]" : "bg-[#4768ca] text-white hover:enabled:bg-[#3958b4]")} onclick={busy === "update" ? stopUpdate : update}
+    <a href="#/targets" class="{ui.panel} {ui.panelRow} text-[var(--text)] transition-colors hover:bg-[var(--inset)]"><span class={ui.headingTitle}><ListChecks size={17} />{m.targetsTitle}</span><ChevronRight size={17} /></a>
+
+    <CertificateDetails certificates={info?.validity?.certificates} serials={info?.serials}
+      verification={certificateVerification} integrity={info?.integrity} messages={m} bind:open={detailsOpen} />
+
+    <section class="{ui.panel}">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <h2 class={ui.headingTitle}>{m.keyboxSource}</h2>
+        <Dropdown id="keybox-source-options" label={m.keyboxSource} options={sourceOptions} selected={keyboxSource}
+          open={sourceOpen} {reducedMotion} disabled={busy !== null || !moddir} describedBy="keybox-source-hint"
+          triggerClass={ui.selectButton} onOpenChange={toggleSource} onSelect={setSource}>
+          {#snippet trigger()}
+            <span>{sourceOptions.find(option => option.value === keyboxSource)?.label}</span>
+            <ChevronDown size={16} class={"text-[var(--muted)] transition-transform " + (sourceOpen ? "rotate-180" : "")} />
+          {/snippet}
+        </Dropdown>
+      </div>
+      <p id="keybox-source-hint" class="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{keyboxSource === "auto" ? m.sourceAutoHint : m.sourceManualHint}</p>
+    </section>
+
+    <div class="grid grid-cols-2 {ui.buttonGroup}">
+      <button class={ui.button + " col-span-full " + (busy === "update" ? "bg-[var(--red-bg)] text-[var(--red)]" : "bg-[var(--accent)] text-[var(--accent-ink)] hover:enabled:brightness-95")} onclick={busy === "update" ? stopUpdate : update}
         disabled={!moddir || (busy === "update" ? !updateRunning || cancelling || cancelRequested : busy !== null)}>
         {#if busy === "update"}
           {#if cancelling || cancelRequested || !updateRunning}<Loader2 size={17} class="motion-safe:animate-spin" />{:else}<Square size={17} />{/if}
@@ -602,11 +667,6 @@
         {busy === "refresh" ? m.refreshing : m.refresh}
       </button>
     </div>
-
-    <CertificateDetails certificates={info?.validity?.certificates} serials={info?.serials}
-      verification={certificateVerification} integrity={info?.integrity} messages={m} bind:open={detailsOpen} />
-
-    <a href="#/targets" class="{ui.panel} flex min-h-10 items-center justify-between gap-2 !py-2 text-sm font-semibold text-[var(--text)] transition-colors hover:bg-[var(--inset)]"><span class={ui.headingTitle}><ListChecks size={17} />{m.targetsTitle}</span><ChevronRight size={17} /></a>
 
     <section class="{ui.panel}">
       <div class="{ui.heading}"><h2 class={ui.headingTitle}><CalendarClock size={17} />{m.schedule}</h2></div>

@@ -28,6 +28,7 @@ svg { flex-shrink: 0; }
   --bg: #f3f5fa; --panel: #fff; --inset: #edf1f8; --line: #dfe5ef;
   --text: #202b42; --muted: #69768e; --accent: #3d5ec2; --red: #cb414c; --success: #18764b;
   --accent-bg: #e6edff; --accent-ink: #fff; --red-bg: #fcecee;
+  --success-bg: #e5f4eb; --warning: #8a6100; --warning-bg: #fff4cf;
   --log-source: #6941a5; --log-waiting: #8a5200; --log-failure: #b83240;
   min-height: 100dvh; color: var(--text); background: var(--bg);
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
@@ -37,6 +38,7 @@ svg { flex-shrink: 0; }
   --bg: #0d1220; --panel: #151d30; --inset: #1d2840; --line: #2c3954;
   --text: #edf2ff; --muted: #a1aec7; --accent: #a8c7ff; --red: #ff858c; --success: #79dba4;
   --accent-bg: #24375c; --accent-ink: #13264a; --red-bg: #3a2024;
+  --success-bg: #18382b; --warning: #f3cf6e; --warning-bg: #3c321a;
   --log-source: #d4b3ff; --log-waiting: #f3c46e; --log-failure: #ff858c;
 }
 @keyframes page-appear {

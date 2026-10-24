@@ -13,11 +13,12 @@ const compile = (source) => ts.transpileModule(source, {
 }).outputText
 
 // Execute the component's actual handlers; bypass module discovery and DOM rendering.
-function harness(t) {
+function harness(t, savedSource = null) {
   t.mock.timers.enable({ apis: ["setTimeout"] })
   const calls = []
   const toasts = []
   const timers = new Set()
+  let storedSource = savedSource ?? "auto"
   let mount
   const media = { matches: false, addEventListener() {}, removeEventListener() {} }
   const module = { exports: {} }
@@ -27,20 +28,30 @@ function harness(t) {
   runInNewContext(compile(i18n), { exports: locale.exports, navigator: { language: "en" } })
   const source = app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1]
     .replace('let moddir = $state("")', 'let moddir = $state("/data/adb/modules/keybox-lite")')
+  const targetDisabled = app.match(/<TargetManager\b[^>]*disabled=\{([^}]+)\}/)[1]
   const hooks = `
     export const handlers = {
-      update, stopUpdate, appendOutput,
+      update, stopUpdate, appendOutput, setSource, loadMeta,
+      openTargets: () => { window.location.hash = "#/targets"; syncRoute() },
+      targetsDisabled: () => (${targetDisabled}),
+      targetsPage: () => targetsPage,
+      source: () => keyboxSource,
       mount: () => onMountForTest(),
       state: () => ({ busy, cancelling, cancelRequested, updateRunning, output, error })
     }
   `
   runInNewContext(compile(source + hooks), {
     exports: module.exports,
+    AbortController,
     require(name) {
-      if (name === "svelte") return { onMount: (fn) => { mount = fn } }
+      if (name === "svelte") return { onMount: (fn) => { mount = fn }, tick: () => Promise.resolve() }
       if (name === "./lib/i18n") return locale.exports
       if (name === "./lib/log") return logModule.exports
       if (name === "./lib/bridge") return {
+        execUpdate(command, onOutput, timeout, signal, onStarted) {
+          onStarted(() => new Promise((resolve) => calls.push({ command: "stop-owned-supervisor", resolve })))
+          return new Promise((resolve) => calls.push({ command, onLine: (line) => module.exports.handlers.appendOutput(line), onOutput, signal, resolve }))
+        },
         exec(command, onLine) {
           if (command.includes("action.sh") || command.includes("cancel-update")) {
             return new Promise((resolve) => calls.push({ command, onLine, resolve }))
@@ -48,7 +59,11 @@ function harness(t) {
           if (command.endsWith(' info')) return Promise.resolve({
             errno: 0, stdout: JSON.stringify({ path: "", exists: false, size: 0, modified: 0, structure_valid: false, serials: [] }), stderr: ""
           })
-          return Promise.resolve({ errno: 0, stdout: command.includes("settings.sh") ? "SCHEDULE=off\nLAST_RUN=0" : "", stderr: "" })
+          if (command.includes("settings.sh")) {
+            if (command.includes("source ")) storedSource = command.trim().split(/\s+/).pop()
+            return Promise.resolve({ errno: 0, stdout: "SCHEDULE=off\nLAST_RUN=0\nSOURCE=" + storedSource, stderr: "" })
+          }
+          return Promise.resolve({ errno: 0, stdout: "", stderr: "" })
         },
         toast: (...args) => toasts.push(args),
         enableEdgeToEdge() {},
@@ -58,8 +73,8 @@ function harness(t) {
     $state: Object.assign((value) => value, { raw: (value) => value }),
     $derived: (value) => value,
     $effect() {},
-    localStorage: { getItem() { return null } },
-    window: { matchMedia: () => media, location: { hash: "" }, addEventListener() {}, removeEventListener() {} },
+    localStorage: { getItem(key) { return key === "keybox-lite-source" ? savedSource : null }, setItem() {} },
+    window: { matchMedia: () => media, location: { hash: "" }, scrollTo() {}, addEventListener() {}, removeEventListener() {} },
     onMountForTest: () => mount(),
     setTimeout(fn, ms) {
       const id = setTimeout(() => { timers.delete(id); fn() }, ms)
@@ -71,6 +86,50 @@ function harness(t) {
   return { ...module.exports.handlers, calls, toasts, timers }
 }
 const result = (errno, extra = {}) => ({ errno, stdout: "", stderr: "", ...extra })
+
+test("WebUI source selection persists and every update uses the saved source", async (t) => {
+  const h = harness(t)
+  for (const source of ["auto", "meow", "spectre"]) {
+    await h.setSource(source)
+    assert.equal(h.source(), source)
+    const update = h.update()
+    const call = h.calls.at(-1)
+    assert.equal(call.command, `"/data/adb/modules/keybox-lite/bin/keyboxlite" run-update "/data/adb/modules/keybox-lite/action.sh" /data/adb/keybox-lite`)
+    h.setSource(source === "meow" ? "spectre" : "meow")
+    assert.equal(h.source(), source, "selection cannot change during an update")
+    call.resolve(result(0))
+    await update
+  }
+  h.setSource("spectre'; touch /tmp/untrusted")
+  await Promise.resolve()
+  assert.equal(h.source(), "spectre")
+})
+
+test("Tricky Store remains available while an update is pending", async (t) => {
+  const h = harness(t)
+  const pending = h.update()
+  assert.equal(h.state().busy, "update")
+  h.openTargets()
+  assert.equal(h.targetsPage(), true)
+  assert.equal(h.targetsDisabled(), false)
+  assert.equal(h.calls.length, 1)
+  h.calls[0].resolve(result(0))
+  await pending
+  assert.equal(h.state().busy, null)
+  assert.equal(h.targetsDisabled(), false)
+})
+
+test("settings source loads supported providers and rejects an unsupported value", async (t) => {
+  for (const [stored, expected] of [
+    [null, "auto"], ["auto", "auto"], ["meow", "meow"], ["spectre", "spectre"],
+  ]) {
+    const h = harness(t, stored)
+    await h.loadMeta()
+    assert.equal(h.source(), expected)
+    t.mock.timers.reset()
+  }
+  await assert.rejects(() => harness(t, "addon").loadMeta())
+})
 
 test("stop is unavailable when idle and deduplicated while pending and after acceptance", async (t) => {
   const h = harness(t)
@@ -143,6 +202,35 @@ test("accepted stop does not disguise bridge timeout or unrelated failure", asyn
     assert.ok(h.state().error)
     t.mock.timers.reset()
   }
+})
+
+test("update snapshots replace logs and destruction aborts monitoring without a late toast", async (t) => {
+  const h = harness(t)
+  const pending = h.update()
+  const call = h.calls[0]
+  call.onOutput("first\n")
+  call.onOutput("first\nsecond\n")
+  assert.equal(h.state().output, "first\nsecond\n")
+  const cleanup = h.mount()
+  cleanup()
+  assert.equal(call.signal.aborted, true)
+  call.onOutput("late")
+  call.resolve(result(0))
+  await pending
+  assert.equal(h.state().output, "first\nsecond\n")
+  assert.equal(h.toasts.length, 0)
+  assert.equal(h.timers.size, 0)
+})
+
+test("update failure preserves earlier stop diagnostics", async (t) => {
+  const h = harness(t)
+  const pending = h.update()
+  const stop = h.stopUpdate()
+  h.calls[1].resolve(result(1, { stderr: "stop denied" }))
+  await stop
+  h.calls[0].resolve(result(1, { stderr: "download failed" }))
+  await pending
+  assert.equal(h.state().error, "stop denied\ndownload failed")
 })
 
 test("logs batch in order, stay bounded, flush on exit, and release timer on unmount", async (t) => {

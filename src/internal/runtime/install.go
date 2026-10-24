@@ -186,6 +186,15 @@ func (e *engine) update(ctx context.Context) (resultErr error) {
 	if !e.enabled() {
 		return fmt.Errorf("module is disabled or being removed")
 	}
+	// An explicit KBL_SOURCES already fixed the order; otherwise the saved
+	// source selection drives both Action/WebUI and scheduled updates.
+	if len(e.sources) == 0 {
+		c, err := e.readConfig()
+		if err != nil {
+			return err
+		}
+		e.sources = sourcesFor(c.source)
+	}
 	if err = safePath(e.p.tmp, true); err != nil {
 		return err
 	}

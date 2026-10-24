@@ -138,8 +138,21 @@ func (e *engine) uninstall(ctx context.Context) error {
 	if err := e.d.cleanup(e.p.module); err != nil {
 		return err
 	}
-	for _, p := range []string{e.p.conf, filepath.Join(e.p.tmp, "keybox-update.log"), filepath.Join(e.p.tmp, "keybox-update.history")} {
+	for _, p := range []string{e.p.conf, e.legacyConf(), filepath.Join(e.p.tmp, "keybox-update.log"), filepath.Join(e.p.tmp, "keybox-update.history")} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	// Application data must not survive an uninstall. The stopping marker and the
+	// lock inodes stay: late writers are blocked by the marker and still contend
+	// on the same lock files until the root manager deletes the module.
+	for _, p := range []string{
+		filepath.Join(e.p.state, "targets"),
+		filepath.Join(e.p.state, "status-cache"),
+		filepath.Join(e.p.state, "scheduler.pid"),
+		filepath.Join(e.p.state, "maintenance.pid"),
+	} {
+		if err := os.RemoveAll(p); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}

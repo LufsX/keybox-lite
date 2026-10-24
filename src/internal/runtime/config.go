@@ -5,6 +5,18 @@ import (
 	"strings"
 )
 
+func validSource(s string) bool { return s == "auto" || s == "meow" || s == "spectre" }
+
+func sourcesFor(source string) []string {
+	switch source {
+	case "meow":
+		return []string{"meow"}
+	case "spectre":
+		return []string{"spectre"}
+	default:
+		return []string{"meow", "spectre"}
+	}
+}
 func parseSources(value string) ([]string, error) {
 	seen := map[string]bool{}
 	var out []string

@@ -71,7 +71,7 @@ function harness({ saved, storageFails = false } = {}) {
   return { ...handlers, writes, calls, result: value => { nextResult = value }, info: value => { nextInfo = value }, queueInfo: (...values) => infoReads.push(...values) }
 }
 
-function dropdownHarness() {
+function dropdownHarness({ disabled = false } = {}) {
   const module = { exports: {} }
   const changes = []
   const choices = []
@@ -82,16 +82,21 @@ function dropdownHarness() {
   const source = dropdown.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1]
   runInNewContext(compile(source + `
     export const handlers = {
-      dismiss, keydown, select,
+      dismiss, keydown, select, navigate,
       setOpen: value => { open = value },
       bind: (element, trigger) => { control = element; button = trigger }
     }
   `), {
     exports: module.exports,
-    require() { return {} },
+    require(name) {
+      if (name === "../ui") return loadModule("../src/lib/ui.ts")
+      if (name === "svelte") return { tick: () => Promise.resolve() }
+      return {}
+    },
     Node,
+    document: { activeElement: null },
     $props: () => ({
-      open: true, options: [], selected: "en",
+      open: true, disabled, options: [{ value: "en" }, { value: "ja" }, { value: "zh" }], selected: "ja",
       onOpenChange(value) { changes.push(value); module.exports.handlers.setOpen(value) },
       onSelect(value) { choices.push(value) },
     }),
@@ -138,6 +143,28 @@ test("shared Dropdown chooses the option, closes and restores focus", () => {
   assert.deepEqual(h.choices, ["ja"])
   assert.deepEqual(h.changes, [false])
   assert.equal(h.focused(), 1)
+})
+
+test("shared Dropdown blocks disabled selection and keyboard opening", async () => {
+  const h = dropdownHarness({ disabled: true })
+  h.select("ja")
+  await h.navigate({ key: "ArrowDown", preventDefault() { assert.fail("disabled trigger handled a key") } })
+  assert.deepEqual(h.choices, [])
+  assert.deepEqual(h.changes, [])
+})
+
+test("shared Dropdown opens at the selected option and supports endpoint keys", async () => {
+  const h = dropdownHarness()
+  const focus = []
+  const items = ["en", "ja", "zh"].map(value => ({ focus: () => focus.push(value) }))
+  h.bind({ querySelectorAll: () => items }, { focus() {} })
+  h.setOpen(false)
+  const key = key => h.navigate({ key, preventDefault() {} })
+  await key("ArrowDown")
+  await key("End")
+  await key("Home")
+  assert.deepEqual(h.changes, [true])
+  assert.deepEqual(focus, ["ja", "zh", "en"])
 })
 
 test("selecting every supported language persists it and closes the menu", () => {

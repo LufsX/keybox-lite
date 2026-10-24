@@ -14,7 +14,7 @@ func TestRuntimeBootFailureKeepsSchedule(t *testing.T) {
 		t.Run(schedule, func(t *testing.T) {
 			e := fixture(t)
 			e.init()
-			e.writeConfig(config{schedule, 0})
+			e.writeConfig(config{schedule, 0, "auto"})
 			boots, launches, ticks := 0, 0, 0
 			e.d.boot = func(string) error {
 				boots++
@@ -52,7 +52,7 @@ func TestRuntimeBootFailureKeepsSchedule(t *testing.T) {
 			}
 			if schedule == "daily" {
 				// The real worker loop must still perform a due tick after Boot failed.
-				e.d.update = func(context.Context) error { ticks++; return e.writeConfig(config{"off", 0}) }
+				e.d.update = func(context.Context) error { ticks++; return e.writeConfig(config{"off", 0, "auto"}) }
 				if err := e.service(context.Background(), true); err != nil {
 					t.Fatal(err)
 				}

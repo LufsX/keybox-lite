@@ -57,12 +57,12 @@ func TestRuntimeScheduleConcurrentSettings(t *testing.T) {
 	e := fixture(t)
 	e.out = io.Discard
 	e.init()
-	e.writeConfig(config{"daily", 0})
+	e.writeConfig(config{"daily", 0, "auto"})
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	e.d.update = func(context.Context) error { close(entered); <-release; return nil }
 	done := make(chan error, 1)
-	go func() { done <- e.tick(context.Background(), config{"daily", 0}) }()
+	go func() { done <- e.tick(context.Background(), config{"daily", 0, "auto"}) }()
 	<-entered
 	if err := e.settings(context.Background(), []string{"set", "weekly"}); err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestRuntimeUninstallInterruptsUpdate(t *testing.T) {
 	e := fixture(t)
 	e.out = io.Discard
 	e.init()
-	e.writeConfig(config{"daily", 0})
+	e.writeConfig(config{"daily", 0, "auto"})
 	e.meow = "https://example.test/payload"
 	setResponses(t, e, map[string]response{e.meow: {Body: meowEncode("GOOD")}})
 	entered := make(chan struct{})
@@ -114,6 +114,34 @@ func TestRuntimeUninstallInterruptsUpdate(t *testing.T) {
 		t.Fatal("uninstall retained settings")
 	}
 	unchanged(t, e)
+}
+func TestRuntimeUninstallRemovesState(t *testing.T) {
+	e := fixture(t)
+	e.out = io.Discard
+	if err := e.init(); err != nil {
+		t.Fatal(err)
+	}
+	stale := []string{"status-cache", "scheduler.pid", "maintenance.pid", "targets/state.json", "targets/lock", "targets/transaction.json"}
+	for _, name := range stale {
+		mustWrite(t, filepath.Join(e.p.state, name), []byte("stale"))
+	}
+	if err := e.uninstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range stale {
+		if exists(filepath.Join(e.p.state, name)) {
+			t.Fatalf("uninstall left state/%s", name)
+		}
+	}
+	// The late-writer guard files must survive for the root manager.
+	if !exists(filepath.Join(e.p.state, "stopping")) {
+		t.Fatal("uninstall lost stopping marker")
+	}
+	for _, name := range []string{"action.lock", "scheduler.lock", "maintenance.lock", "config.lock"} {
+		if !exists(filepath.Join(e.p.state, name)) {
+			t.Fatalf("uninstall lost state/%s", name)
+		}
+	}
 }
 func TestRuntimeUnsafeTargetsAndAtomicMetadata(t *testing.T) {
 	for _, mode := range []string{"symlink", "directory", "parent-symlink", "backend-change", "cancelled"} {

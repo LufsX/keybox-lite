@@ -61,8 +61,8 @@ func production(module string) *engine {
 			bin = p
 		}
 	}
-	e := &engine{p: paths{root: "/", module: module, state: "/data/adb/keybox-lite", conf: "/data/adb/keybox-lite.conf", tmp: tmp, bin: bin}, out: os.Stdout,
-		sources: []string{"meow", "spectre"}, accel: "https://c.etc.moe/", poll: 30 * time.Minute, downloadBudget: 60 * time.Second, maintenancePoll: 30 * time.Second, maintenanceBudget: 10 * time.Minute}
+	e := &engine{p: paths{root: "/", module: module, state: "/data/adb/keybox-lite", conf: "/data/adb/keybox-lite/config", tmp: tmp, bin: bin}, out: os.Stdout,
+		accel: "https://c.etc.moe/", poll: 30 * time.Minute, downloadBudget: 60 * time.Second, maintenancePoll: 30 * time.Second, maintenanceBudget: 10 * time.Minute}
 	if value, ok := os.LookupEnv("KBL_SOURCES"); ok {
 		e.sources, e.configErr = parseSources(value)
 	}
@@ -123,13 +123,20 @@ func Run(args []string) int {
 		if len(args) != 3 && len(args) != 4 {
 			return 2
 		}
-		if args[2] != "get" && args[2] != "set" {
-			return 2
-		}
-		if args[2] == "get" && len(args) != 3 {
-			return 2
-		}
-		if args[2] == "set" && (len(args) != 4 || !validSchedule(args[3])) {
+		switch args[2] {
+		case "get":
+			if len(args) != 3 {
+				return 2
+			}
+		case "set":
+			if len(args) != 4 || !validSchedule(args[3]) {
+				return 2
+			}
+		case "source":
+			if len(args) != 4 || !validSource(args[3]) {
+				return 2
+			}
+		default:
 			return 2
 		}
 	case "service":

@@ -14,15 +14,22 @@ import (
 type config struct {
 	schedule string
 	last     int64
+	source   string
 }
 
 func validSchedule(s string) bool { return s == "off" || s == "daily" || s == "weekly" }
 func (e *engine) readConfig() (config, error) {
-	c := config{schedule: "off"}
-	if err := safePath(e.p.conf, false); err != nil {
+	c := config{schedule: "off", source: "auto"}
+	// Settings live inside the state directory; earlier versions kept a file
+	// next to it, so the legacy path is read until the first save migrates it.
+	path := e.p.conf
+	if !exists(path) && exists(e.legacyConf()) {
+		path = e.legacyConf()
+	}
+	if err := safePath(path, false); err != nil {
 		return c, err
 	}
-	raw, err := os.ReadFile(e.p.conf)
+	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return c, nil
 	}
@@ -36,6 +43,9 @@ func (e *engine) readConfig() (config, error) {
 		}
 		if k == "SCHEDULE" && validSchedule(v) {
 			c.schedule = v
+		}
+		if k == "SOURCE" && validSource(v) {
+			c.source = v
 		}
 		if k == "LAST_RUN" && v != "" && strings.Trim(v, "0123456789") == "" {
 			v = strings.TrimLeft(v, "0")
@@ -51,6 +61,9 @@ func (e *engine) readConfig() (config, error) {
 		}
 	}
 	return c, nil
+}
+func (e *engine) legacyConf() string {
+	return filepath.Join(filepath.Dir(e.p.state), "keybox-lite.conf")
 }
 func (e *engine) atomic(path string, data []byte, mode os.FileMode) error {
 	if err := safePath(path, false); err != nil {
@@ -80,7 +93,15 @@ func (e *engine) atomic(path string, data []byte, mode os.FileMode) error {
 	return err
 }
 func (e *engine) writeConfig(c config) error {
-	return e.atomic(e.p.conf, []byte(fmt.Sprintf("SCHEDULE=%s\nLAST_RUN=%d\n", c.schedule, c.last)), 0600)
+	if err := e.atomic(e.p.conf, []byte(fmt.Sprintf("SCHEDULE=%s\nLAST_RUN=%d\nSOURCE=%s\n", c.schedule, c.last, c.source)), 0600); err != nil {
+		return err
+	}
+	// The new file is authoritative; a leftover legacy file is only read when
+	// the new one is missing, so removing it is best effort.
+	if legacy := e.legacyConf(); legacy != e.p.conf {
+		os.Remove(legacy)
+	}
+	return nil
 }
 func lock(ctx context.Context, path string, wait time.Duration) (*os.File, error) {
 	if err := safePath(path, false); err != nil {
@@ -125,7 +146,7 @@ func (e *engine) settings(ctx context.Context, args []string) error {
 	if args[0] == "get" {
 		c, err := e.readConfig()
 		if err == nil {
-			fmt.Fprintf(e.out, "SCHEDULE=%s\nLAST_RUN=%d\n", c.schedule, c.last)
+			fmt.Fprintf(e.out, "SCHEDULE=%s\nLAST_RUN=%d\nSOURCE=%s\n", c.schedule, c.last, c.source)
 		}
 		return err
 	}
@@ -142,12 +163,21 @@ func (e *engine) settings(ctx context.Context, args []string) error {
 	}
 	c, err := e.readConfig()
 	if err == nil {
-		c.schedule = args[1]
+		if args[0] == "source" {
+			c.source = args[1]
+		} else {
+			c.schedule = args[1]
+		}
 		err = e.writeConfig(c)
 	}
 	f.Close()
 	if err != nil {
 		return err
+	}
+	if args[0] == "source" {
+		// The scheduler re-reads the config for every run, so no relaunch is needed.
+		fmt.Fprintf(e.out, "SOURCE=%s\n", c.source)
+		return nil
 	}
 	fmt.Fprintf(e.out, "SCHEDULE=%s\n", c.schedule)
 	if c.schedule == "off" {
@@ -182,13 +212,16 @@ func (e *engine) stopRecord(name string) error {
 	if err != nil {
 		return err
 	}
+	// A truncated or corrupted record is stale: its writer can no longer be
+	// identified, but it re-reads settings and stops on its own. Uninstall must
+	// not abort before cleanup because of it.
 	fields := strings.Fields(string(raw))
 	if len(fields) != 2 {
-		return fmt.Errorf("invalid scheduler record")
+		return nil
 	}
 	pid, err := strconv.Atoi(fields[0])
 	if err != nil {
-		return err
+		return nil
 	}
 	if token := processToken(pid); token != "" && token == fields[1] {
 		if err = e.d.signal(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
