@@ -21,7 +21,7 @@ const maxPrepareBytes = 1 << 20
 func Prepare(data []byte, backend string) ([]byte, error) {
 	backend = strings.ReplaceAll(backend, "-", "_")
 	switch backend {
-	case "tricky_store", "tricky_store_legacy", "tee_simulator", "oh_my_keymint":
+	case "tricky_store", "tricky_store_legacy", "tee_simulator", "tee_simulator_rs", "oh_my_keymint":
 	default:
 		return nil, errors.New("unsupported keybox backend")
 	}
@@ -39,7 +39,7 @@ func Prepare(data []byte, backend string) ([]byte, error) {
 	stack := []*frame{}
 	var key *prepareKey
 	roots, boxes, boxKeys, certified := 0, 0, 0, 0
-	hasEC, rootClosed, declaration := false, false, false
+	hasEC, hasRSA, rootClosed, declaration := false, false, false, false
 	boxCount, boxCountSeen := -1, false
 	fail := func(reason string) ([]byte, error) { return nil, errors.New(reason) }
 	for {
@@ -106,6 +106,7 @@ func Prepare(data []byte, backend string) ([]byte, error) {
 				key = &prepareKey{algorithm: algorithm}
 				boxKeys++
 				hasEC = hasEC || algorithm == "ec"
+				hasRSA = hasRSA || algorithm == "rsa"
 			case "PrivateKey":
 				if key.private {
 					return fail("duplicate PrivateKey")
@@ -212,6 +213,9 @@ func Prepare(data []byte, backend string) ([]byte, error) {
 	}
 	if backend == "oh_my_keymint" && !hasEC {
 		return fail("OhMyKeymint requires an EC Key")
+	}
+	if backend == "tee_simulator" && (!hasEC || !hasRSA) {
+		return fail("TEESimulator requires both an EC and an RSA Key")
 	}
 	if err := encoder.Flush(); err != nil {
 		return fail("cannot encode keybox XML")

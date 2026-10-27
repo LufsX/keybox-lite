@@ -11,6 +11,7 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"math/big"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -99,7 +100,7 @@ func TestPrepareBackendsAndKeyEncodings(t *testing.T) {
 	for _, f := range []prepareFixture{ec, rsa} {
 		for _, private := range []string{f.private, f.pkcs8} {
 			f.private = private
-			for _, backend := range []string{"tricky_store", "tricky-store", "tricky_store_legacy", "tricky-store-legacy", "tee_simulator", "tee-simulator", "oh_my_keymint", "oh-my-keymint"} {
+			for _, backend := range []string{"tricky_store", "tricky-store", "tricky_store_legacy", "tricky-store-legacy", "tee_simulator", "tee-simulator", "tee_simulator_rs", "tee-simulator-rs", "oh_my_keymint", "oh-my-keymint"} {
 				t.Run(f.algorithm+"/"+backend, func(t *testing.T) {
 					input := prepareTestDocument(prepareTestKey(f, 2, "<NumberOfCertificates>2</NumberOfCertificates>"))
 					got, err := Prepare(input, backend)
@@ -110,6 +111,12 @@ func TestPrepareBackendsAndKeyEncodings(t *testing.T) {
 							}
 							return
 						}
+					}
+					if backend == "tee_simulator" || backend == "tee-simulator" {
+						if err == nil || got != nil {
+							t.Fatal("TEESimulator accepted a single-algorithm keybox")
+						}
+						return
 					}
 					if err != nil || !StructureValid(got) || !bytes.HasSuffix(got, []byte("\n")) {
 						t.Fatalf("Prepare result: bytes=%d, error=%v", len(got), err)
@@ -124,9 +131,9 @@ func TestPrepareBackendsAndKeyEncodings(t *testing.T) {
 	}
 	// A certified EC key plus an uncertified RSA key is accepted only by TS.
 	mixed := prepareTestDocument(prepareTestKey(ec, 1, ""), prepareTestKey(rsa, -1, ""))
-	for _, backend := range []string{"tricky_store", "tricky_store_legacy", "tee_simulator", "oh_my_keymint"} {
+	for _, backend := range []string{"tricky_store", "tricky_store_legacy", "tee_simulator", "tee_simulator_rs", "oh_my_keymint"} {
 		_, err := Prepare(mixed, backend)
-		wantOK := strings.HasPrefix(backend, "tricky")
+		wantOK := strings.HasPrefix(backend, "tricky") || backend == "tee_simulator_rs"
 		if (err == nil) != wantOK {
 			t.Fatalf("uncertified RSA on %s: %v", backend, err)
 		}
@@ -138,24 +145,56 @@ func TestPrepareBackendCertificateCounts(t *testing.T) {
 	for _, tc := range []struct {
 		name, declaration string
 		count             int
-		ts, tee, omk      bool
+		ts, omk           bool
 	}{
-		{"missing chain", "", -1, false, false, false},
-		{"empty chain", "", 0, false, false, false},
-		{"one certificate", "<NumberOfCertificates>1</NumberOfCertificates>", 1, true, false, true},
-		{"two certificates", "<NumberOfCertificates>2</NumberOfCertificates>", 2, true, true, true},
-		{"missing declaration", "", 2, true, true, false},
-		{"wrong declaration", "<NumberOfCertificates>1</NumberOfCertificates>", 2, true, true, false},
-		{"invalid declaration", "<NumberOfCertificates>secret</NumberOfCertificates>", 2, true, true, false},
-		{"empty declaration", "<NumberOfCertificates/>", 2, true, true, false},
+		{"missing chain", "", -1, false, false},
+		{"empty chain", "", 0, false, false},
+		{"one certificate", "<NumberOfCertificates>1</NumberOfCertificates>", 1, true, true},
+		{"two certificates", "<NumberOfCertificates>2</NumberOfCertificates>", 2, true, true},
+		{"missing declaration", "", 2, true, false},
+		{"wrong declaration", "<NumberOfCertificates>1</NumberOfCertificates>", 2, true, false},
+		{"invalid declaration", "<NumberOfCertificates>secret</NumberOfCertificates>", 2, true, false},
+		{"empty declaration", "<NumberOfCertificates/>", 2, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := prepareTestDocument(prepareTestKey(ec, tc.count, tc.declaration))
-			for backend, want := range map[string]bool{"tricky_store": tc.ts, "tee_simulator": tc.tee, "oh_my_keymint": tc.omk} {
+			// TEESimulator needs both an EC and an RSA key, so a single-keybox row never proves it.
+			for backend, want := range map[string]bool{"tricky_store": tc.ts, "tee_simulator": false, "tee_simulator_rs": tc.ts, "oh_my_keymint": tc.omk} {
 				got, err := Prepare(data, backend)
 				if (err == nil) != want || (err != nil && got != nil) {
 					t.Fatalf("%s: expected accepted=%v, got %v", backend, want, err)
 				}
+			}
+		})
+	}
+}
+
+func TestPrepareTeeSimulatorAlgorithmRequirements(t *testing.T) {
+	ec, rsa := prepareFixtureFor(t, "ec"), prepareFixtureFor(t, "rsa")
+	key := func(f prepareFixture, count int) string {
+		return prepareTestKey(f, count, "<NumberOfCertificates>"+strconv.Itoa(count)+"</NumberOfCertificates>")
+	}
+	both := prepareTestDocument(key(ec, 2), key(rsa, 2))
+	if got, err := Prepare(both, "tee_simulator"); err != nil || !StructureValid(got) {
+		t.Fatalf("TEESimulator rejected a keybox with both algorithms and full chains: %v", err)
+	}
+	for name, data := range map[string][]byte{
+		"ec only":         prepareTestDocument(key(ec, 2)),
+		"rsa only":        prepareTestDocument(key(rsa, 2)),
+		"ec short chain":  prepareTestDocument(key(ec, 1), key(rsa, 2)),
+		"rsa short chain": prepareTestDocument(key(ec, 2), key(rsa, 1)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := Prepare(data, "tee_simulator"); err == nil || got != nil {
+				t.Fatalf("TEESimulator accepted %s", name)
+			}
+		})
+	}
+	// TEESimulator-RS signs with whichever algorithm a keybox carries.
+	for name, data := range map[string][]byte{"ec only": prepareTestDocument(key(ec, 1)), "rsa only": prepareTestDocument(key(rsa, 1))} {
+		t.Run("rs/"+name, func(t *testing.T) {
+			if got, err := Prepare(data, "tee_simulator_rs"); err != nil || !StructureValid(got) {
+				t.Fatalf("TEESimulator-RS rejected %s: %v", name, err)
 			}
 		})
 	}
@@ -279,7 +318,7 @@ func TestPrepareRejectsMalformedPEMAndDER(t *testing.T) {
 	first := bytes.Index(mixedChain, []byte(ec.certificate))
 	second := bytes.Index(mixedChain[first+len(ec.certificate):], []byte(ec.certificate)) + first + len(ec.certificate)
 	mixedChain = append(append(append([]byte{}, mixedChain[:second]...), []byte(rsa.certificate)...), mixedChain[second+len(ec.certificate):]...)
-	if _, err := Prepare(mixedChain, "tee_simulator"); err != nil {
+	if _, err := Prepare(mixedChain, "tricky_store"); err != nil {
 		t.Fatalf("mixed-algorithm issuer chain rejected: %v", err)
 	}
 }

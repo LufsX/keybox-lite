@@ -21,6 +21,7 @@ const (
 	TrickyStoreLegacy Kind = "tricky-store-legacy"
 	OhMyKeymint       Kind = "oh-my-keymint"
 	TeeSimulator      Kind = "tee-simulator"
+	TeeSimulatorRS    Kind = "tee-simulator-rs"
 )
 
 // Target describes one installed module and the file its default keybox uses.
@@ -96,12 +97,21 @@ func Detect(root string) (Report, error) {
 		target.Active = active
 		switch id {
 		case "tricky_store":
-			target.Backend, target.Identity = TrickyStoreLegacy, "TS-L"
 			target.ConfigDir = "/data/adb/tricky_store"
-			target.ConfigPath = target.ConfigDir + "/target.txt"
-			if target.VersionCode != nil && *target.VersionCode >= 246 {
+			rs, statusErr := teeSimulatorRS(root, moduleDir, props)
+			if statusErr != nil {
+				return report, fmt.Errorf("%s status: %w", id, statusErr)
+			}
+			switch {
+			case rs:
+				target.Backend, target.Identity = TeeSimulatorRS, "TEES-RS"
+				target.ConfigPath = target.ConfigDir + "/target.txt"
+			case target.VersionCode != nil && *target.VersionCode >= 246:
 				target.Backend, target.Identity = TrickyStore, "TS"
 				target.ConfigPath = target.ConfigDir + "/config.ini"
+			default:
+				target.Backend, target.Identity = TrickyStoreLegacy, "TS-L"
+				target.ConfigPath = target.ConfigDir + "/target.txt"
 			}
 		case "oh_my_keymint":
 			target.Backend, target.Identity = OhMyKeymint, "OMK"
@@ -151,6 +161,28 @@ func properties(raw string) map[string]string {
 		}
 	}
 	return result
+}
+
+// teeSimulatorRS reports whether the tricky_store module is TEESimulator-RS. That
+// fork reuses Tricky Store's module ID and target.txt layout while raising its
+// versionCode past Tricky Store's config.ini boundary, so the module name decides
+// first; its native certificate generator is the fallback for a renamed module.
+func teeSimulatorRS(root, moduleDir string, props map[string]string) (bool, error) {
+	if strings.Contains(strings.ToLower(props["name"]), "teesimulator-rs") {
+		return true, nil
+	}
+	marker := moduleDir + "/libcertgen.so"
+	if err := checkPath(root, marker, true); err != nil {
+		return false, err
+	}
+	_, err := os.Lstat(hostPath(root, marker))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 func teeKeyboxPath(root string, target Target) (string, error) {

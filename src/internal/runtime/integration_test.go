@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -24,22 +25,35 @@ import (
 
 func syntheticKeybox(t *testing.T) string {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	issue := func(private, public any) string {
+		cert := &x509.Certificate{SerialNumber: big.NewInt(42), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+		der, err := x509.CreateCertificate(rand.Reader, cert, cert, public, private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	}
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	priv, err := x509.MarshalECPrivateKey(key)
+	ecPriv, err := x509.MarshalECPrivateKey(ecKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert := &x509.Certificate{SerialNumber: big.NewInt(42), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
-	der, err := x509.CreateCertificate(rand.Reader, cert, cert, &key.PublicKey, key)
+	ecPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: ecPriv}))
+	ecCert := issue(ecKey, &ecKey.PublicKey)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: priv}))
-	c := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
-	return fmt.Sprintf("<AndroidAttestation><NumberOfKeyboxes>1</NumberOfKeyboxes><Keybox DeviceID=\"synthetic\"><Key algorithm=\"ecdsa\"><PrivateKey format=\"pem\">%s</PrivateKey><CertificateChain><NumberOfCertificates>2</NumberOfCertificates><Certificate format=\"pem\">%s</Certificate><Certificate format=\"pem\">%s</Certificate></CertificateChain></Key></Keybox></AndroidAttestation>\n", p, c, c)
+	rsaPEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(rsaKey)}))
+	rsaCert := issue(rsaKey, &rsaKey.PublicKey)
+	// TEESimulator requires both algorithms, each with a leaf and an issuer.
+	return fmt.Sprintf("<AndroidAttestation><NumberOfKeyboxes>1</NumberOfKeyboxes><Keybox DeviceID=\"synthetic\">"+
+		"<Key algorithm=\"ecdsa\"><PrivateKey format=\"pem\">%s</PrivateKey><CertificateChain><NumberOfCertificates>2</NumberOfCertificates><Certificate format=\"pem\">%s</Certificate><Certificate format=\"pem\">%s</Certificate></CertificateChain></Key>"+
+		"<Key algorithm=\"rsa\"><PrivateKey format=\"pem\">%s</PrivateKey><CertificateChain><NumberOfCertificates>2</NumberOfCertificates><Certificate format=\"pem\">%s</Certificate><Certificate format=\"pem\">%s</Certificate></CertificateChain></Key>"+
+		"</Keybox></AndroidAttestation>\n", ecPEM, ecCert, ecCert, rsaPEM, rsaCert, rsaCert)
 }
 func realCommands(t *testing.T, e *engine) {
 	t.Helper()

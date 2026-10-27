@@ -104,7 +104,11 @@ func (e *engine) candidate(ctx context.Context, j routeJob, s *sourceState, url,
 	if ctx.Err() != nil || s.revoked.Load() {
 		return nil, fmt.Errorf("source stopped")
 	}
-	e.say("[%s / %s] [OK] Backend and certificate checks passed.", j.source, j.route)
+	if e.skipRevocation {
+		e.say("[%s / %s] [OK] Backend and local certificate checks passed; revocation skipped.", j.source, j.route)
+	} else {
+		e.say("[%s / %s] [OK] Backend and certificate checks passed.", j.source, j.route)
+	}
 	return prepared, nil
 }
 func (e *engine) fetch(ctx context.Context, j routeJob, s *sourceState, work, kind string) []byte {

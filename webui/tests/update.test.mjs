@@ -13,12 +13,14 @@ const compile = (source) => ts.transpileModule(source, {
 }).outputText
 
 // Execute the component's actual handlers; bypass module discovery and DOM rendering.
-function harness(t, savedSource = null) {
+function harness(t, savedSource = null, savedSkip = "0") {
   t.mock.timers.enable({ apis: ["setTimeout"] })
   const calls = []
   const toasts = []
   const timers = new Set()
   let storedSource = savedSource ?? "auto"
+  let storedSkip = savedSkip
+  let settingsFailure = false
   let mount
   const media = { matches: false, addEventListener() {}, removeEventListener() {} }
   const module = { exports: {} }
@@ -31,7 +33,8 @@ function harness(t, savedSource = null) {
   const targetDisabled = app.match(/<TargetManager\b[^>]*disabled=\{([^}]+)\}/)[1]
   const hooks = `
     export const handlers = {
-      update, stopUpdate, appendOutput, setSource, loadMeta,
+      update, stopUpdate, appendOutput, setSource, setSkipRevocation, loadMeta,
+      skipsRevocation: () => skipRevocation,
       openTargets: () => { window.location.hash = "#/targets"; syncRoute() },
       targetsDisabled: () => (${targetDisabled}),
       targetsPage: () => targetsPage,
@@ -60,8 +63,10 @@ function harness(t, savedSource = null) {
             errno: 0, stdout: JSON.stringify({ path: "", exists: false, size: 0, modified: 0, structure_valid: false, serials: [] }), stderr: ""
           })
           if (command.includes("settings.sh")) {
+            if (settingsFailure) return Promise.resolve({ errno: 1, stdout: "", stderr: "save failed" })
             if (command.includes("source ")) storedSource = command.trim().split(/\s+/).pop()
-            return Promise.resolve({ errno: 0, stdout: "SCHEDULE=off\nLAST_RUN=0\nSOURCE=" + storedSource, stderr: "" })
+            if (command.includes("skip-revocation ")) storedSkip = command.trim().split(/\s+/).pop()
+            return Promise.resolve({ errno: 0, stdout: "SCHEDULE=off\nLAST_RUN=0\nSOURCE=" + storedSource + (storedSkip === null ? "" : "\nSKIP_REVOCATION=" + storedSkip), stderr: "" })
           }
           return Promise.resolve({ errno: 0, stdout: "", stderr: "" })
         },
@@ -83,7 +88,7 @@ function harness(t, savedSource = null) {
     },
     clearTimeout(id) { timers.delete(id); clearTimeout(id) },
   })
-  return { ...module.exports.handlers, calls, toasts, timers }
+  return { ...module.exports.handlers, calls, toasts, timers, failSettings: value => { settingsFailure = value } }
 }
 const result = (errno, extra = {}) => ({ errno, stdout: "", stderr: "", ...extra })
 
@@ -103,6 +108,32 @@ test("WebUI source selection persists and every update uses the saved source", a
   h.setSource("spectre'; touch /tmp/untrusted")
   await Promise.resolve()
   assert.equal(h.source(), "spectre")
+})
+
+test("skip revocation persists, rejects malformed settings, and stays unchanged on failure or busy updates", async (t) => {
+  const h = harness(t)
+  await h.loadMeta()
+  assert.equal(h.skipsRevocation(), false)
+  await h.setSkipRevocation(true)
+  assert.equal(h.skipsRevocation(), true)
+  h.failSettings(true)
+  await h.setSkipRevocation(false)
+  assert.equal(h.skipsRevocation(), true)
+  assert.match(h.state().error, /save failed/)
+  h.failSettings(false)
+  const pending = h.update()
+  await h.setSkipRevocation(false)
+  assert.equal(h.skipsRevocation(), true)
+  h.calls[0].resolve(result(0))
+  await pending
+  await h.setSkipRevocation(false)
+  assert.equal(h.skipsRevocation(), false)
+  t.mock.timers.reset()
+  const missing = harness(t, null, null)
+  await missing.loadMeta()
+  assert.equal(missing.skipsRevocation(), false)
+  t.mock.timers.reset()
+  await assert.rejects(() => harness(t, null, "yes").loadMeta())
 })
 
 test("Tricky Store remains available while an update is pending", async (t) => {

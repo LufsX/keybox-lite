@@ -45,7 +45,8 @@ func escapeStatusText(text string) string {
 	return out.String()
 }
 
-// Run: 0 = time-valid and not revoked, 1 = revoked/suspended,
+// Run: 0 = local checks passed and (unless explicitly skipped) not revoked,
+// 1 = revoked/suspended,
 // 2 = could not check, 3 = expired or not yet valid.
 func Run(args []string) int {
 	accel, configured := os.LookupEnv("KB_ACCEL")
@@ -53,8 +54,16 @@ func Run(args []string) int {
 		accel = "https://c.etc.moe/"
 	}
 	kbPath := ""
-	if len(args) > 0 {
-		kbPath = args[0]
+	skipRevocation := false
+	for _, arg := range args {
+		if arg == "--skip-revocation" && !skipRevocation {
+			skipRevocation = true
+		} else if strings.HasPrefix(arg, "-") || kbPath != "" {
+			termfmt.Println("[FAIL] usage: verify [--skip-revocation] [file]")
+			return 2
+		} else {
+			kbPath = arg
+		}
 	}
 	if kbPath == "" {
 		kbPath = info.DetectPath()
@@ -116,6 +125,12 @@ func Run(args []string) int {
 		return 2
 	}
 
+	if skipRevocation {
+		termfmt.Println("[SKIP] revocation: explicitly skipped; current revocation status not checked")
+		termfmt.Println("RESULT: skipped (revocation)")
+		return 0
+	}
+
 	dir, err := os.MkdirTemp(tmpDir(), "keybox-verify-")
 	if err != nil {
 		termfmt.Printf("[FAIL] could not create verification workdir: %v\n", err)
@@ -129,7 +144,7 @@ func Run(args []string) int {
 		return 2
 	}
 	if download.cached {
-		termfmt.Printf("[CACHE] status: cache hit (<60s, %s)\n", download.url)
+		termfmt.Printf("[CACHE] status: cache hit (<%dm, %s)\n", statusCacheTTL/time.Minute, download.url)
 	} else {
 		termfmt.Printf("[CHECK] status: live (%s)\n", download.url)
 	}

@@ -157,7 +157,12 @@ func (e *engine) prepare(ctx context.Context, kind string, data []byte, dir stri
 	return []byte(b.String()), err
 }
 func (e *engine) verify(ctx context.Context, file, dir string, out io.Writer) int {
-	err := e.command(ctx, dir, nil, out, "verify", file)
+	args := []string{"verify"}
+	if e.skipRevocation {
+		args = append(args, "--skip-revocation")
+	}
+	args = append(args, file)
+	err := e.command(ctx, dir, nil, out, args...)
 	if err == nil {
 		return 0
 	}

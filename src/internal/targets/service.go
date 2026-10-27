@@ -190,14 +190,24 @@ func (m *manager) detect() (*backend.Target, []byte, error) {
 		}
 		switch id {
 		case "tricky_store":
-			t.Backend = backend.TrickyStoreLegacy
-			t.Identity = "TS-L"
 			t.ConfigDir = "/data/adb/tricky_store"
-			t.ConfigPath = t.ConfigDir + "/target.txt"
-			if t.VersionCode != nil && *t.VersionCode >= 246 {
+			rs, statusErr := m.teeSimulatorRS(&t, p)
+			if statusErr != nil {
+				return nil, nil, statusErr
+			}
+			switch {
+			case rs:
+				t.Backend = backend.TeeSimulatorRS
+				t.Identity = "TEES-RS"
+				t.ConfigPath = t.ConfigDir + "/target.txt"
+			case t.VersionCode != nil && *t.VersionCode >= 246:
 				t.Backend = backend.TrickyStore
 				t.Identity = "TS"
 				t.ConfigPath = t.ConfigDir + "/config.ini"
+			default:
+				t.Backend = backend.TrickyStoreLegacy
+				t.Identity = "TS-L"
+				t.ConfigPath = t.ConfigDir + "/target.txt"
 			}
 		case "oh_my_keymint":
 			t.Backend = backend.OhMyKeymint
@@ -218,8 +228,33 @@ func (m *manager) detect() (*backend.Target, []byte, error) {
 	}
 	return selected, identity, nil
 }
+
+// teeSimulatorRS mirrors backend.teeSimulatorRS: the fork keeps Tricky Store's
+// module ID and target.txt layout, so only its module name and native certificate
+// generator separate it from Tricky Store's config.ini versions.
+func (m *manager) teeSimulatorRS(t *backend.Target, props map[string]string) (bool, error) {
+	if strings.Contains(strings.ToLower(props["name"]), "teesimulator-rs") {
+		return true, nil
+	}
+	s, native, err := m.disk.lstatEntry(t.ModuleDir + "/libcertgen.so")
+	if err != nil {
+		return false, err
+	}
+	return s.Exists && native, nil
+}
+
+// isSupported reports whether the active backend's app list is editable. Every
+// detected backend keeps its list in a file this manager understands; backends
+// with no app list of their own are not detected at all.
 func isSupported(t *backend.Target) bool {
-	return t != nil && (t.Backend == backend.TrickyStore || t.Backend == backend.TrickyStoreLegacy)
+	if t == nil {
+		return false
+	}
+	switch t.Backend {
+	case backend.TrickyStore, backend.TrickyStoreLegacy, backend.TeeSimulatorRS, backend.TeeSimulator, backend.OhMyKeymint:
+		return true
+	}
+	return false
 }
 
 type loaded struct {
@@ -246,7 +281,7 @@ func (m *manager) load(packages bool) (loaded, error) {
 	l.status.SystemApps = st.SystemApps
 	l.status.AutoAddNewApps = st.Auto
 	if isSupported(t) {
-		l.doc, err = readDocument(m.disk, t.Backend == backend.TrickyStoreLegacy)
+		l.doc, err = readDocument(m.disk, t.Backend)
 		if err != nil {
 			l.status.ConfigError = err.Error()
 		} else {
@@ -338,6 +373,9 @@ func (m *manager) save(r SaveRequest) error {
 		if l.doc.legacy && len(c.PerAppPolicy) > 0 {
 			return fmt.Errorf("legacy Tricky Store does not support per-app policies")
 		}
+		if err := l.doc.validate(c); err != nil {
+			return err
+		}
 		st := l.state
 		st.SystemApps = append([]string{}, r.SystemApps...)
 		st.Auto = r.AutoAddNewApps
@@ -414,6 +452,11 @@ func (m *manager) autoLocked() error {
 		if len(c.Targets) != len(l.doc.config.Targets) {
 			if err = validateConfig(&c); err != nil {
 				return err
+			}
+			// A backend that owns one list per profile may reject the addition;
+			// skipping keeps an optional boot-time auto-add from writing a bad file.
+			if err = l.doc.validate(c); err != nil {
+				return nil
 			}
 			changes = l.doc.changes(c)
 		}

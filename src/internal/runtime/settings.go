@@ -12,9 +12,21 @@ import (
 )
 
 type config struct {
-	schedule string
-	last     int64
-	source   string
+	schedule       string
+	last           int64
+	source         string
+	skipRevocation bool
+}
+
+func boolSetting(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func configText(c config) string {
+	return fmt.Sprintf("SCHEDULE=%s\nLAST_RUN=%d\nSOURCE=%s\nSKIP_REVOCATION=%d\n", c.schedule, c.last, c.source, boolSetting(c.skipRevocation))
 }
 
 func validSchedule(s string) bool { return s == "off" || s == "daily" || s == "weekly" }
@@ -43,6 +55,9 @@ func (e *engine) readConfig() (config, error) {
 		}
 		if k == "SCHEDULE" && validSchedule(v) {
 			c.schedule = v
+		}
+		if k == "SKIP_REVOCATION" {
+			c.skipRevocation = v == "1"
 		}
 		if k == "SOURCE" && validSource(v) {
 			c.source = v
@@ -93,7 +108,7 @@ func (e *engine) atomic(path string, data []byte, mode os.FileMode) error {
 	return err
 }
 func (e *engine) writeConfig(c config) error {
-	if err := e.atomic(e.p.conf, []byte(fmt.Sprintf("SCHEDULE=%s\nLAST_RUN=%d\nSOURCE=%s\n", c.schedule, c.last, c.source)), 0600); err != nil {
+	if err := e.atomic(e.p.conf, []byte(configText(c)), 0600); err != nil {
 		return err
 	}
 	// The new file is authoritative; a leftover legacy file is only read when
@@ -146,7 +161,7 @@ func (e *engine) settings(ctx context.Context, args []string) error {
 	if args[0] == "get" {
 		c, err := e.readConfig()
 		if err == nil {
-			fmt.Fprintf(e.out, "SCHEDULE=%s\nLAST_RUN=%d\nSOURCE=%s\n", c.schedule, c.last, c.source)
+			fmt.Fprint(e.out, configText(c))
 		}
 		return err
 	}
@@ -165,6 +180,8 @@ func (e *engine) settings(ctx context.Context, args []string) error {
 	if err == nil {
 		if args[0] == "source" {
 			c.source = args[1]
+		} else if args[0] == "skip-revocation" {
+			c.skipRevocation = args[1] == "1"
 		} else {
 			c.schedule = args[1]
 		}
@@ -173,6 +190,10 @@ func (e *engine) settings(ctx context.Context, args []string) error {
 	f.Close()
 	if err != nil {
 		return err
+	}
+	if args[0] == "skip-revocation" {
+		fmt.Fprintf(e.out, "SKIP_REVOCATION=%d\n", boolSetting(c.skipRevocation))
+		return nil
 	}
 	if args[0] == "source" {
 		// The scheduler re-reads the config for every run, so no relaunch is needed.

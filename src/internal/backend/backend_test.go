@@ -23,8 +23,13 @@ func put(t *testing.T, root, devicePath, content string) string {
 
 func module(t *testing.T, root, id, version string, flags ...string) {
 	t.Helper()
+	moduleNamed(t, root, id, "Test "+id, version, flags...)
+}
+
+func moduleNamed(t *testing.T, root, id, name, version string, flags ...string) {
+	t.Helper()
 	dir := "/data/adb/modules/" + id
-	put(t, root, dir+"/module.prop", "# fixture\r\nid="+id+"\nname=Test "+id+"\nversion=fixture\nversionCode="+version+"\n")
+	put(t, root, dir+"/module.prop", "# fixture\r\nid="+id+"\nname="+name+"\nversion=fixture\nversionCode="+version+"\n")
 	for _, flag := range flags {
 		put(t, root, dir+"/"+flag, "")
 	}
@@ -72,6 +77,44 @@ func TestEveryBackendAndTrickyVersionBoundary(t *testing.T) {
 				t.Fatalf("unexpected install metadata: %+v", got)
 			}
 		})
+	}
+}
+
+func TestTeeSimulatorRSDetection(t *testing.T) {
+	// TEESimulator-RS reuses Tricky Store's module ID and target.txt layout with a
+	// versionCode above Tricky Store's config.ini boundary.
+	root := t.TempDir()
+	moduleNamed(t, root, "tricky_store", "TEESimulator-RS", "307")
+	got := selected(t, root)
+	if got.Backend != TeeSimulatorRS || got.Identity != "TEES-RS" ||
+		got.ConfigDir != "/data/adb/tricky_store" || got.ConfigPath != "/data/adb/tricky_store/target.txt" ||
+		got.KeyboxPath != "/data/adb/tricky_store/keybox.xml" {
+		t.Fatalf("unexpected RS detection: %+v", got)
+	}
+	// A renamed module is still recognised by its native certificate generator.
+	root = t.TempDir()
+	moduleNamed(t, root, "tricky_store", "Trick Store", "307")
+	put(t, root, "/data/adb/modules/tricky_store/libcertgen.so", "native")
+	if selected(t, root).Backend != TeeSimulatorRS {
+		t.Fatal("native certificate generator marker ignored")
+	}
+	// Tricky Store keeps its own classification at every version.
+	for _, tc := range []struct {
+		version string
+		want    Kind
+		config  string
+	}{
+		{"307", TrickyStore, "config.ini"},
+		{"246", TrickyStore, "config.ini"},
+		{"245", TrickyStoreLegacy, "target.txt"},
+		{"", TrickyStoreLegacy, "target.txt"},
+	} {
+		root = t.TempDir()
+		moduleNamed(t, root, "tricky_store", "Tricky Store", tc.version)
+		got = selected(t, root)
+		if got.Backend != tc.want || got.ConfigPath != "/data/adb/tricky_store/"+tc.config {
+			t.Fatalf("Tricky Store %q: %+v", tc.version, got)
+		}
 	}
 }
 

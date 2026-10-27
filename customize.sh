@@ -22,7 +22,7 @@ done
 rm -f /data/adb/keybox-lite/stopping || abort "! Cannot enable Keybox Lite"
 
 ui_print "- Standalone backend detection, validation and backed-up installation"
-ui_print "- Supports Tricky Store, OhMyKeymint and TEESimulator"
+ui_print "- Supports Tricky Store, TEESimulator, TEESimulator-RS and OhMyKeymint"
 
 ui_print "- Use the module Action button to install a keybox."
 ui_print " "

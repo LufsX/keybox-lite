@@ -57,7 +57,7 @@ export function parseCertificateStatus(stdout: string, exitCode: number | null |
     if (!line) continue
     if (terminal) trailing = true
     if (/[\x00-\x1f\x7f-\x9f]/.test(line)) { failed = true; continue }
-    const route = /^(?:\[CHECK\] status: (live|mirror) \([^()]+\)|\[CACHE\] status: cache hit \(<60s, [^()]+\))$/.exec(line)
+    const route = /^(?:\[CHECK\] status: (live|mirror) \([^()]+\)|\[CACHE\] status: cache hit \(<(?:60s|10m), [^()]+\))$/.exec(line)
     if (route) {
       sourceCount++
       source = route[1] === "live" ? "live" : route[1] === "mirror" ? "mirror" : "cache"

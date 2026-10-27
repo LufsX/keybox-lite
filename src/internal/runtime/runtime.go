@@ -38,6 +38,7 @@ type engine struct {
 	out                                io.Writer
 	log                                *os.File
 	mu                                 sync.Mutex
+	skipRevocation                     bool
 	sources                            []string
 	accel, meow, addon, catalog, base  string
 	tools                              []downloader
@@ -130,6 +131,10 @@ func Run(args []string) int {
 			}
 		case "set":
 			if len(args) != 4 || !validSchedule(args[3]) {
+				return 2
+			}
+		case "skip-revocation":
+			if len(args) != 4 || (args[3] != "0" && args[3] != "1") {
 				return 2
 			}
 		case "source":

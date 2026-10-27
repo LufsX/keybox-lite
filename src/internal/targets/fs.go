@@ -299,6 +299,10 @@ func allowedJournalPath(p string) bool {
 			return true
 		}
 	}
+	// Backends that keep their app list inside a daemon configuration file.
+	if p == "/data/adb/teesim/config.json" || p == "/data/misc/keystore/omk/injector.toml" {
+		return true
+	}
 	for _, id := range backendIDs {
 		for _, n := range []string{"webroot", "action.sh"} {
 			if p == "/data/adb/modules/"+id+"/"+n {

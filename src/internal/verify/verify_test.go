@@ -163,8 +163,10 @@ func TestRunRejectsInvalidCryptographyBeforeNetwork(t *testing.T) {
 	if err := os.WriteFile(path, []byte(mismatch), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := Run([]string{path}); got != 2 {
-		t.Fatalf("mismatched private key passed: %d", got)
+	for _, args := range [][]string{{path}, {"--skip-revocation", path}} {
+		if got := Run(args); got != 2 {
+			t.Fatalf("mismatched private key passed (%v): %d", args, got)
+		}
 	}
 	if _, err := os.Stat(log); !os.IsNotExist(err) {
 		t.Fatalf("invalid keybox reached downloader: %v", err)

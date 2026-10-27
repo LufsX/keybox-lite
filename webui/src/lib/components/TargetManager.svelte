@@ -16,7 +16,7 @@
     type TargetStatus, type TargetDraft, type TargetMode, type PolicyKey, type Policy,
   } from "../targets"
 
-  let { bin, lang, disabled = false, onMenuChange, onTitleVisibility }: { bin: string; lang: Locale; disabled?: boolean; onMenuChange?: (open: boolean) => void; onTitleVisibility?: (visible: boolean) => void } = $props()
+  let { bin, lang, disabled = false, onMenuChange, onTitleVisibility, onTitleChange }: { bin: string; lang: Locale; disabled?: boolean; onMenuChange?: (open: boolean) => void; onTitleVisibility?: (visible: boolean) => void; onTitleChange?: (title: string) => void } = $props()
   let m = $derived(messages[lang])
   let status = $state<TargetStatus | null>(null)
   let draft = $state<TargetDraft | null>(null)
@@ -310,6 +310,7 @@
   }
   function accept(value: TargetStatus) {
     status = value
+    onTitleChange?.(value.backend?.name || "Tricky Store")
     if (!value.packages.length && !value.config.targets.length) catalogReady = true
     entryReady = true
     ready = !value.config_error && !value.packages_error
@@ -395,6 +396,11 @@
     if (target) target.mode = mode
     notice = ""
   }
+  // Only Tricky Store's formats carry per-app modes and patch policies; TEESimulator
+  // and OhMyKeymint store a plain package list.
+  const modeBackends = new Set(["tricky-store", "tricky-store-legacy", "tee-simulator-rs"])
+  function supportsModes(): boolean { return modeBackends.has(status?.backend?.backend ?? "") }
+  function supportsGlobalPolicy(): boolean { return supportsModes() }
   function supportsAppPolicy(): boolean { return status?.backend?.backend === "tricky-store" }
   function setPolicy(name: string | null, key: PolicyKey, value: string) {
     if (!canEdit() || !draft || (name !== null && !supportsAppPolicy())) return
@@ -481,7 +487,7 @@
 <svelte:window onbeforeunload={beforeUnload} onpointerdown={dismissMenu} onfocusin={dismissMenu} onkeydown={menuKeydown} {onscroll} />
 
 <div class="page-enter target-page relative min-w-0 text-xs" aria-busy={pending} out:pageExit|global>
-  <h1 use:trackTitle class="mb-3 text-xl font-[650] leading-[1.35] tracking-[-.6px] max-[359px]:text-lg">Tricky Store</h1>
+  <h1 use:trackTitle class="mb-3 text-xl font-[650] leading-[1.35] tracking-[-.6px] max-[359px]:text-lg">{status?.backend?.name || "Tricky Store"}</h1>
   {#if menuOpen}
     <div bind:this={menuElement} id="targets-menu" role="menu" aria-label={m.targetsMore}
       class="target-menu fixed z-50 grid w-64 overflow-y-auto" transition:surface>
@@ -491,7 +497,7 @@
         { value: "refresh", label: m.refresh, icon: RefreshCw, blocked: locked },
         { value: "system", label: m.targetsSystemApps, icon: ListPlus, blocked: !editable },
         { value: "auto", label: m.targetsAutoAdd, icon: PackagePlus, blocked: !editable },
-        { value: "global", label: m.targetsGlobalPolicy, icon: SlidersHorizontal, blocked: !editable },
+        { value: "global", label: m.targetsGlobalPolicy, icon: SlidersHorizontal, blocked: !editable || !supportsGlobalPolicy() },
         { value: "manual", label: m.targetsManual, icon: ListPlus, blocked: !editable },
         { value: "entry", label: m.targetsEntry, icon: Settings2, blocked: !status }
       ] as option}
@@ -569,7 +575,8 @@
                 icon={metadata.get(app.package_name)?.icon ?? null} selected={app.selected} mode={app.mode} modeLabel={modeLabel(app.mode)}
                 system={app.system} systemLabel={m.targetsSystem} customPolicy={!!draft?.per_app_policy[app.package_name]}
                 policyLabel={m.targetsAppPolicy} missing={!app.installed} missingLabel={m.targetsMissing} editLabel={m.targetsEdit}
-                disabled={!editable} ontoggle={() => select(app.package_name, !app.selected)} ontune={() => openEditor(app.package_name)} />
+                disabled={!editable} ontoggle={() => select(app.package_name, !app.selected)}
+                ontune={supportsModes() || supportsAppPolicy() ? () => openEditor(app.package_name) : undefined} />
             </div>
           {/snippet}
         </VirtualList>
@@ -623,9 +630,11 @@
       <fieldset disabled={!editable} class="grid gap-2">
         <input class={inputClass} aria-label={m.targetsManual} placeholder={m.targetsManual} bind:value={manual}
           onkeydown={(event) => { if (event.key === "Enter") { event.preventDefault(); addManual() } }} />
-        <select class={inputClass} aria-label={m.targetsMode} bind:value={manualMode}>
-          {#each modes as mode}<option value={mode}>{modeLabel(mode)}</option>{/each}
-        </select>
+        {#if supportsModes()}
+          <select class={inputClass} aria-label={m.targetsMode} bind:value={manualMode}>
+            {#each modes as mode}<option value={mode}>{modeLabel(mode)}</option>{/each}
+          </select>
+        {/if}
         {#if error}<p role="alert" class="text-[var(--red)]">{error}</p>{/if}
       </fieldset>
     {:else if sheet === "entry" && status}
@@ -658,16 +667,18 @@
 
 {#if editor}
   <Modal title={m.targetsEdit} description={editor.name} closeLabel={m.targetsClose} busy={pending} onclose={closeEditor}>
-    <fieldset disabled={!editable} class="grid gap-1.5">
-      <legend class="sr-only">{m.targetsMode}</legend>
-      {#each modes as mode}
-        <label class="flex min-h-10 cursor-pointer items-center gap-2 rounded-[10px] border border-transparent bg-[var(--inset)] px-2 py-1.5 transition-colors has-[:checked]:border-[var(--accent)] has-[:checked]:bg-[var(--accent-bg)]">
-          <input type="radio" name="target-mode" value={mode} bind:group={editor.mode} class="ui-radio" />
-          <span>{modeLabel(mode)}</span>
-          <span class="ml-auto font-mono text-[11px] text-[var(--muted)]">{mode === "auto" ? "" : mode === "generate" ? "!" : "?"}</span>
-        </label>
-      {/each}
-    </fieldset>
+    {#if supportsModes()}
+      <fieldset disabled={!editable} class="grid gap-1.5">
+        <legend class="sr-only">{m.targetsMode}</legend>
+        {#each modes as mode}
+          <label class="flex min-h-10 cursor-pointer items-center gap-2 rounded-[10px] border border-transparent bg-[var(--inset)] px-2 py-1.5 transition-colors has-[:checked]:border-[var(--accent)] has-[:checked]:bg-[var(--accent-bg)]">
+            <input type="radio" name="target-mode" value={mode} bind:group={editor.mode} class="ui-radio" />
+            <span>{modeLabel(mode)}</span>
+            <span class="ml-auto font-mono text-[11px] text-[var(--muted)]">{mode === "auto" ? "" : mode === "generate" ? "!" : "?"}</span>
+          </label>
+        {/each}
+      </fieldset>
+    {/if}
     {#if supportsAppPolicy() || canTrackSystem(editor.name)}
       <div class="mt-3 rounded-[10px] border border-[var(--line)]">
         <button type="button" class="flex min-h-10 w-full items-center justify-between gap-2 px-2 py-2 text-left font-medium"

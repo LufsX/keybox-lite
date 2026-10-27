@@ -225,7 +225,7 @@ func TestCacheInvalidRecordsRefresh(t *testing.T) {
 			}
 			switch name {
 			case "expired":
-				record.Fetched = time.Now().Add(-61 * time.Second).UnixNano()
+				record.Fetched = time.Now().Add(-statusCacheTTL - time.Second).UnixNano()
 			case "boundary":
 				record.Fetched = time.Now().Add(-statusCacheTTL).UnixNano()
 			case "future":

@@ -27,7 +27,7 @@ test("decimal serial normalization preserves precision, zero and rejects nondeci
 })
 
 test("live/cache require matching exit/result and retain exact serial-specific reasons", () => {
-  for (const route of [live, cache]) {
+  for (const route of [live, cache, cache.replace("<60s", "<10m")]) {
     const clear = parse(route + "RESULT: not revoked\n", 0)
     assert.equal(clear.completed, true)
     assert.equal(state(clear), "not-revoked")
@@ -41,6 +41,12 @@ test("live/cache require matching exit/result and retain exact serial-specific r
     assert.equal(lookup(result, "8").reason, "TEMPORARY")
     assert.equal(state(result, "0x8"), "unknown")
   }
+})
+
+test("skipped revocation is never displayed as not revoked", () => {
+  const skipped = parse("[SKIP] revocation check disabled\nRESULT: skipped (revocation)\n", 0)
+  assert.equal(skipped.completed, false)
+  assert.equal(state(skipped), "unknown")
 })
 
 test("mirror positives are useful, but missing serials always stay unknown", () => {

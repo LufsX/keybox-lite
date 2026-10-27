@@ -57,12 +57,12 @@ func TestRuntimeScheduleConcurrentSettings(t *testing.T) {
 	e := fixture(t)
 	e.out = io.Discard
 	e.init()
-	e.writeConfig(config{"daily", 0, "auto"})
+	e.writeConfig(config{schedule: "daily", last: 0, source: "auto"})
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	e.d.update = func(context.Context) error { close(entered); <-release; return nil }
 	done := make(chan error, 1)
-	go func() { done <- e.tick(context.Background(), config{"daily", 0, "auto"}) }()
+	go func() { done <- e.tick(context.Background(), config{schedule: "daily", last: 0, source: "auto"}) }()
 	<-entered
 	if err := e.settings(context.Background(), []string{"set", "weekly"}); err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestRuntimeUninstallInterruptsUpdate(t *testing.T) {
 	e := fixture(t)
 	e.out = io.Discard
 	e.init()
-	e.writeConfig(config{"daily", 0, "auto"})
+	e.writeConfig(config{schedule: "daily", last: 0, source: "auto"})
 	e.meow = "https://example.test/payload"
 	setResponses(t, e, map[string]response{e.meow: {Body: meowEncode("GOOD")}})
 	entered := make(chan struct{})

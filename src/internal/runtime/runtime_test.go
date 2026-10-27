@@ -558,17 +558,17 @@ func TestRuntimeScheduleAndUninstall(t *testing.T) {
 	if err := e.service(context.Background(), false); err != nil || boot != 1 {
 		t.Fatalf("off schedule skipped Boot: %v %d", err, boot)
 	}
-	e.writeConfig(config{"daily", 0, "auto"})
+	e.writeConfig(config{schedule: "daily", last: 0, source: "auto"})
 	e.d.update = func(context.Context) error { return fmt.Errorf("failed") }
-	if err := e.tick(context.Background(), config{"daily", 0, "auto"}); err != nil {
+	if err := e.tick(context.Background(), config{schedule: "daily", last: 0, source: "auto"}); err != nil {
 		t.Fatal(err)
 	}
 	c, _ := e.readConfig()
 	if c.last != 0 {
 		t.Fatal("failure advanced timestamp")
 	}
-	e.d.update = func(context.Context) error { return e.writeConfig(config{"weekly", 0, "auto"}) }
-	if err := e.tick(context.Background(), config{"daily", 0, "auto"}); err != nil {
+	e.d.update = func(context.Context) error { return e.writeConfig(config{schedule: "weekly", last: 0, source: "auto"}) }
+	if err := e.tick(context.Background(), config{schedule: "daily", last: 0, source: "auto"}); err != nil {
 		t.Fatal(err)
 	}
 	c, _ = e.readConfig()
@@ -581,7 +581,7 @@ func TestRuntimeScheduleAndUninstall(t *testing.T) {
 	if called != 0 {
 		t.Fatal("not due schedule ran")
 	}
-	e.tick(context.Background(), config{"daily", e.d.now().Unix() + 100, "auto"})
+	e.tick(context.Background(), config{schedule: "daily", last: e.d.now().Unix() + 100, source: "auto"})
 	if called != 1 {
 		t.Fatal("future timestamp suppressed update")
 	}
@@ -627,7 +627,7 @@ func TestRuntimeUninstallWaitsWriter(t *testing.T) {
 func TestRuntimeSchedulerSingleton(t *testing.T) {
 	e := fixture(t)
 	e.init()
-	e.writeConfig(config{"daily", e.d.now().Unix(), "auto"})
+	e.writeConfig(config{schedule: "daily", last: e.d.now().Unix(), source: "auto"})
 	f, _ := lock(context.Background(), filepath.Join(e.p.state, "scheduler.lock"), 0)
 	if err := e.service(context.Background(), true); err != nil {
 		t.Fatal(err)

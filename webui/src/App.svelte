@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte"
   import { pageExit } from "./lib/motion"
-  import { fade } from "svelte/transition"
+  import { fade, slide } from "svelte/transition"
   import {
     RefreshCw, Loader2, ShieldCheck, ShieldAlert, ShieldQuestion,
     Languages, HardDrive, Download, ArrowLeft, ChevronDown, ChevronRight, EllipsisVertical,
@@ -23,6 +23,7 @@
   let targetManager: { canLeave(): boolean; toggleMenu(): void } | undefined = $state()
   let targetMenuOpen = $state(false)
   let targetTitleVisible = $state(false)
+  let targetTitle = $state("Tricky Store")
   function syncRoute() {
     const next = window.location.hash === "#/targets"
     if (targetsPage && !next && targetManager && !targetManager.canLeave()) {
@@ -117,6 +118,16 @@
   type KeyboxSource = "auto" | "meow" | "spectre"
   const keyboxSources: KeyboxSource[] = ["auto", "meow", "spectre"]
   let keyboxSource = $state<KeyboxSource>("auto")
+  let skipRevocation = $state(false)
+  async function setSkipRevocation(value: boolean) {
+    if (busy !== null || !moddir) return
+    await run("settings", async () => {
+      const r = await exec('sh "' + moddir + '/settings.sh" skip-revocation ' + (value ? "1" : "0"))
+      requireSuccess(r, m.settingsFailed)
+      await loadMeta()
+      if (skipRevocation !== value) throw new Error(m.settingsFailed)
+    })
+  }
   let sourceOpen = $state(false)
   const sourceOptions = $derived(keyboxSources.map(value => ({
     value, label: value === "auto" ? m.sourceAuto : value === "meow" ? "Meow" : "Spectre",
@@ -322,12 +333,14 @@
     const next = kv(s.stdout, "SCHEDULE")
     const last = Number(kv(s.stdout, "LAST_RUN"))
     const src = kv(s.stdout, "SOURCE") || "auto"
-    if (!schedules.includes(next as Schedule) || !Number.isFinite(last) || last < 0 || !keyboxSources.includes(src as KeyboxSource)) {
+    const skip = kv(s.stdout, "SKIP_REVOCATION") || "0"
+    if (!schedules.includes(next as Schedule) || !Number.isFinite(last) || last < 0 || !keyboxSources.includes(src as KeyboxSource) || !["0", "1"].includes(skip)) {
       throw new Error(m.settingsFailed)
     }
     schedule = next as Schedule
     lastRun = last
     keyboxSource = src as KeyboxSource
+    skipRevocation = skip === "1"
     const rec = await exec(
       'grep \'^version=\' "' + moddir + '/module.prop" || exit $?; echo \'---\'; ' +
       'if [ -f /data/local/tmp/keybox-update.history ]; then tail -n 20 /data/local/tmp/keybox-update.history; fi'
@@ -536,14 +549,14 @@
   })
 </script>
 
-<svelte:head><title>{targetsPage ? "Tricky Store" : "Keybox Lite"}</title></svelte:head>
+<svelte:head><title>{targetsPage ? targetTitle : "Keybox Lite"}</title></svelte:head>
 
 <div class="app-shell">
   <main class="mx-auto w-full max-w-[var(--page-width)] px-[var(--page-gutter)] pt-[var(--page-top)] pb-5">
     <header class={targetsPage ? "target-toolbar flex min-h-10 items-center gap-1.5" : "mb-3 flex items-center gap-2"}>
       {#if targetsPage}
         <a href="#/" class={ui.iconButton} aria-label={m.targetsBack} title={m.targetsBack} onclick={returnHome}><ArrowLeft size={18} /></a>
-        <div class="target-toolbar-title min-w-0 flex-1 truncate text-sm font-semibold" class:is-visible={targetTitleVisible} aria-hidden={!targetTitleVisible}>Tricky Store</div>
+        <div class="target-toolbar-title min-w-0 flex-1 truncate text-sm font-semibold" class:is-visible={targetTitleVisible} aria-hidden={!targetTitleVisible}>{targetTitle}</div>
         <button id="targets-menu-trigger" type="button" class={ui.iconButton + " target-more"} aria-label={m.targetsMore} aria-haspopup="menu" aria-controls="targets-menu" aria-expanded={targetMenuOpen}
           onclick={() => targetManager?.toggleMenu()}><EllipsisVertical size={19} /></button>
       {:else}
@@ -568,7 +581,7 @@
     <Toast message={error} active={!targetsPage} closeLabel={m.targetsClose} onclose={() => error = ""} />
 
     {#if targetsPage}
-      <TargetManager {bin} {lang} disabled={!moddir} bind:this={targetManager} onMenuChange={(open) => targetMenuOpen = open} onTitleVisibility={(visible) => targetTitleVisible = visible} />
+      <TargetManager {bin} {lang} disabled={!moddir} bind:this={targetManager} onMenuChange={(open) => targetMenuOpen = open} onTitleVisibility={(visible) => targetTitleVisible = visible} onTitleChange={(title) => targetTitle = title} />
     {:else}
     <div class="page-enter grid min-w-0 gap-3" out:pageExit>
     <section class="{ui.panel} relative" aria-busy={!initialDone || busy === "refresh"}>
@@ -636,18 +649,36 @@
       verification={certificateVerification} integrity={info?.integrity} messages={m} bind:open={detailsOpen} />
 
     <section class="{ui.panel}">
-      <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="grid min-h-8 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
         <h2 class={ui.headingTitle}>{m.keyboxSource}</h2>
         <Dropdown id="keybox-source-options" label={m.keyboxSource} options={sourceOptions} selected={keyboxSource}
           open={sourceOpen} {reducedMotion} disabled={busy !== null || !moddir} describedBy="keybox-source-hint"
           triggerClass={ui.selectButton} onOpenChange={toggleSource} onSelect={setSource}>
           {#snippet trigger()}
-            <span>{sourceOptions.find(option => option.value === keyboxSource)?.label}</span>
-            <ChevronDown size={16} class={"text-[var(--muted)] transition-transform " + (sourceOpen ? "rotate-180" : "")} />
+            <span class="grid min-w-0 text-start">
+              {#each sourceOptions as option}
+                <span class="col-start-1 row-start-1 truncate" class:invisible={option.value !== keyboxSource} aria-hidden={option.value !== keyboxSource}>{option.label}</span>
+              {/each}
+            </span>
+            <ChevronDown size={14} class={"text-[var(--muted)] transition-transform " + (sourceOpen ? "rotate-180" : "")} />
           {/snippet}
         </Dropdown>
       </div>
-      <p id="keybox-source-hint" class="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{keyboxSource === "auto" ? m.sourceAutoHint : m.sourceManualHint}</p>
+      <p id="keybox-source-hint" class="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{m.sourceManualHint}</p>
+      <div class="mt-3 border-t border-[var(--line)] pt-3">
+        <div class="flex min-h-8 items-center justify-between gap-2">
+          <span id="skip-revocation-label" class="text-xs font-[550]">{m.skipRevocation}</span>
+          <button type="button" role="switch" aria-checked={skipRevocation} aria-labelledby="skip-revocation-label" aria-describedby="skip-revocation-hint"
+            disabled={busy !== null || !moddir} onclick={() => setSkipRevocation(!skipRevocation)}
+            class="grid size-8 shrink-0 place-items-center rounded-lg disabled:opacity-50">
+            <span class={"flex h-[18px] w-8 items-center rounded-full p-0.5 transition-colors duration-150 " + (skipRevocation ? "bg-[var(--accent)]" : "bg-[var(--line)]")}>
+              <span class={"size-[14px] rounded-full bg-[var(--panel)] shadow-sm transition-transform duration-150 " + (skipRevocation ? "translate-x-[14px]" : "")}></span>
+            </span>
+          </button>
+        </div>
+        <p id="skip-revocation-hint" class="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{m.skipRevocationHint}</p>
+        <p class="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{m.revocationCacheHint}</p>
+      </div>
     </section>
 
     <div class="grid grid-cols-2 {ui.buttonGroup}">
@@ -675,7 +706,9 @@
           <button onclick={() => setSchedule(opt)} disabled={busy !== null || !moddir} aria-pressed={schedule === opt} class={"min-h-8 min-w-0 rounded-lg px-0.5 py-0.5 text-xs leading-normal transition-colors disabled:opacity-60 " + (schedule === opt ? "bg-[var(--panel)] font-semibold text-[var(--accent)] shadow-sm" : "text-[var(--muted)]")}>{m[opt]}</button>
         {/each}
       </div>
-      {#if schedule && schedule !== "off"}<p class="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{m.lastRun}: {lastRun ? fmtTime(lastRun) : "—"}</p>{/if}
+      <div class="min-h-[18px] mt-2">
+        {#if schedule && schedule !== "off"}<p class="text-[11px] leading-relaxed text-[var(--muted)]" transition:slide={{ duration: reducedMotion ? 0 : 160 }}>{m.lastRun}: {lastRun ? fmtTime(lastRun) : "—"}</p>{/if}
+      </div>
     </section>
 
     <section class="{ui.panel}">

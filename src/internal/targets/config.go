@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"keyboxlite/internal/backend"
 )
 
 type section struct {
@@ -15,6 +17,7 @@ type section struct {
 type document struct {
 	config   Config
 	sections []section
+	backend  backend.Kind
 	legacy   bool
 	target   snapshot
 	patch    snapshot
@@ -50,7 +53,24 @@ func checkText(data []byte) error {
 	}
 	return nil
 }
-func readDocument(d *disk, legacy bool) (document, error) {
+
+// readDocument reads the active app list in the selected backend's own format.
+// Tricky Store, its legacy layout and TEESimulator-RS share target.txt/config.ini;
+// TEESimulator and OhMyKeymint keep the list inside their daemon configuration.
+func readDocument(d *disk, kind backend.Kind) (document, error) {
+	switch kind {
+	case backend.TeeSimulator:
+		return readTeesimulatorDocument(d)
+	case backend.OhMyKeymint:
+		return readOhMyKeymintDocument(d)
+	default:
+		doc, err := readTrickyDocument(d, kind == backend.TrickyStoreLegacy || kind == backend.TeeSimulatorRS)
+		doc.backend = kind
+		return doc, err
+	}
+}
+
+func readTrickyDocument(d *disk, legacy bool) (document, error) {
 	doc := document{config: emptyConfig(), legacy: legacy}
 	name := "config.ini"
 	if legacy {
@@ -258,6 +278,17 @@ func targetLines(c Config) []string {
 	return out
 }
 func (doc document) changes(c Config) []change {
+	switch doc.backend {
+	case backend.TeeSimulator:
+		return doc.teesimulatorChanges(c)
+	case backend.OhMyKeymint:
+		return doc.ohMyKeymintChanges(c)
+	default:
+		return doc.trickyChanges(c)
+	}
+}
+
+func (doc document) trickyChanges(c Config) []change {
 	name := "/data/adb/tricky_store/config.ini"
 	var lines []string
 	if doc.legacy {

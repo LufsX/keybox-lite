@@ -23,7 +23,7 @@ func TestCleanupRecoversInterruptedLegacySaveAsCompleteConfiguration(t *testing.
 				t.Fatal(err)
 			}
 			originalSystems := append([]string{}, st.SystemApps...)
-			doc, err := readDocument(m.disk, true)
+			doc, err := readTrickyDocument(m.disk, true)
 			if err != nil {
 				t.Fatal(err)
 			}

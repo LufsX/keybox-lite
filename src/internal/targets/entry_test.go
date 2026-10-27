@@ -159,16 +159,16 @@ func TestMagiskActionUsesLauncherAndKeepsBackendActions(t *testing.T) {
 		})
 	}
 }
-func TestEntryUnsupportedBackendAndActiveSwitch(t *testing.T) {
+func TestEntryMisconfiguredBackendAndActiveSwitch(t *testing.T) {
 	m, root := fixture(t, false)
 	put(t, root, "/data/adb/modules/tricky_store/disable", "")
 	put(t, root, "/data/adb/modules/oh_my_keymint/module.prop", "id=oh_my_keymint\n")
 	s := getStatus(t, m)
-	if s.Supported || s.Backend == nil || s.Backend.ModuleID != "oh_my_keymint" {
+	if !s.Supported || s.Backend == nil || s.Backend.ModuleID != "oh_my_keymint" || s.ConfigError == "" {
 		t.Fatalf("%+v", s)
 	}
 	if err := m.save(request(s)); err == nil {
-		t.Fatal("unsupported targets accepted")
+		t.Fatal("targets accepted without a readable injector.toml")
 	}
 	if err := m.entrySet(true); err != nil {
 		t.Fatal(err)
@@ -189,6 +189,41 @@ func TestEntryUnsupportedBackendAndActiveSwitch(t *testing.T) {
 	absent(t, root, entryPath)
 	absent(t, root, omkEntry)
 }
+func TestTeeSimulatorRSAppListUsesTargetTxt(t *testing.T) {
+	root := t.TempDir()
+	put(t, root, "/data/adb/modules/tricky_store/module.prop", "id=tricky_store\nname=TEESimulator-RS\nversionCode=307\n")
+	put(t, root, targetPath, "com.a!\n")
+	put(t, root, patchPath, "system=202411\n")
+	m, err := newManager(root, module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.close)
+	m.list = func() (map[string]bool, error) { return map[string]bool{}, nil }
+	s := getStatus(t, m)
+	if s.Backend == nil || s.Backend.Backend != "tee-simulator-rs" || s.Backend.ConfigPath != targetPath ||
+		s.Backend.KeyboxPath != "/data/adb/tricky_store/keybox.xml" {
+		t.Fatalf("%+v", s.Backend)
+	}
+	if !s.Supported || s.ConfigError != "" || len(s.Config.Targets) != 1 ||
+		s.Config.Targets[0].PackageName != "com.a" || s.Config.Targets[0].Mode != "generate" {
+		t.Fatalf("RS target list not manageable: %+v", s)
+	}
+	r := request(s)
+	r.Targets = append(r.Targets, Target{"com.b", "auto"})
+	if err := m.save(r); err != nil {
+		t.Fatal(err)
+	}
+	if text := read(t, root, targetPath); !strings.Contains(text, "com.a!") || !strings.Contains(text, "com.b") {
+		t.Fatal(text)
+	}
+	// A keybox-scoped list is refused instead of being rewritten without its scope.
+	put(t, root, targetPath, "[custom.xml]\ncom.a!\n")
+	if s := getStatus(t, m); s.ConfigError == "" {
+		t.Fatal("keybox-scoped RS target.txt accepted")
+	}
+}
+
 func TestEntryTransactionRollbackAndRetry(t *testing.T) {
 	m, root := fixture(t, false)
 	os.MkdirAll(filepath.Join(root, "data/adb/magisk"), 0755)

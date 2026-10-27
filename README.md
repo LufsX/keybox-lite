@@ -1,7 +1,7 @@
 # Keybox Lite
 
 A KernelSU / APatch / Magisk module that updates the Tricky Store / TEESimulator
-/ OhMyKeymint keybox from the module Action button or the built-in WebUI.
+/ TEESimulator-RS / OhMyKeymint keybox from the module Action button or the built-in WebUI.
 
 - **Sources**: MeowDump "Megatron" and dpejoh "spectre", raced across direct and proxy routes.
   Tricky Addon decoding is opt-in and excluded from automatic updates. Spectre tries
@@ -44,14 +44,28 @@ A KernelSU / APatch / Magisk module that updates the Tricky Store / TEESimulator
 | --- | --- | --- | --- |
 | Tricky Store | `tricky_store`, versionCode >= 246 | `/data/adb/tricky_store/keybox.xml` | At least one certified key |
 | Tricky Store legacy | `tricky_store`, lower/missing versionCode | Same as above | At least one certified key |
+| TEESimulator-RS | `tricky_store` with module name `TEESimulator-RS` or `libcertgen.so` | Same as Tricky Store | At least one certified key |
 | OhMyKeymint | `oh_my_keymint` | `/data/misc/keystore/omk/keybox.xml` | EC key required; each key needs a chain and correct declared certificate count |
-| TEESimulator | `teesim` | `/data/adb/teesim/` + `profiles.default.keybox` from `config.json` (default `keybox.xml`) | Every key needs at least two certificates |
+| TEESimulator | `teesim` | `/data/adb/teesim/` + `profiles.default.keybox` from `config.json` (default `keybox.xml`) | EC and RSA keys required; every key needs at least two certificates |
+
+TEESimulator-RS keeps Tricky Store's module ID and target.txt layout while raising its
+versionCode past Tricky Store's config.ini boundary, so the module name and its native
+certificate generator take precedence over versionCode.
 
 Detection uses installed modules with `module.prop`, preferring active Tricky Store,
 then OhMyKeymint, then TEESimulator. Disabled/removal-pending modules are shown for
 diagnostics but never installed into. Staged-only modules are not active. An unsafe
 or malformed configuration is an error, not a reason to guess a different target.
 Only TEESimulator’s default profile is updated; per-app custom profiles are not rewritten.
+
+Target management edits each backend’s own app list: Tricky Store’s `config.ini` /
+`target.txt`, TEESimulator-RS `target.txt`, TEESimulator `config.json`
+(`profiles.default.apps`) and OhMyKeymint `injector.toml` (`scoop`). Modes and
+patch policies exist only in the Tricky Store formats, so they are hidden for the other
+backends. A TEESimulator-RS `target.txt` that declares keybox scopes, or a package-scoped
+`security_patch.txt`, is reported as unreadable instead of being rewritten without those
+scopes. TEESimulator and OhMyKeymint need their daemon configuration to exist; a missing
+file is an error, not a reason to write a partial one.
 
 Before installation the XML is cleaned of comments/BOM/zero-width markers, structurally
 validated, and checked against the selected backend. Keybox Lite checks PEM/DER shape
@@ -110,6 +124,9 @@ default sources; manual use requires `KBL_SOURCES="meow spectre addon" sh action
 The saved source selection (`auto`, `meow` or `spectre`, stored in
 `/data/adb/keybox-lite/config`) applies to Action, WebUI and scheduled updates and
 defaults to `auto`; `KBL_SOURCES` overrides it for a single run.
+The optional “Skip revocation check” setting defaults to off and applies to updates;
+when enabled, certificate dates, private keys and chains are still validated, and
+revocation is logged as skipped. The manual Check button retains revocation checking.
 `KB_ACCEL` overrides the default `https://c.etc.moe/` proxy prefix; an empty value
 selects direct and built-in GitHub routes.
 Empty responses are rejected. Integration tests use generated data and mock downloads.
@@ -171,5 +188,7 @@ does not change the existing installation policy.
 2 when checking fails, and 3 for certificates outside their validity period.
 Certificate serials exposed by the CLI/JSON remain decimal; revocation matching converts
 them to Google’s hexadecimal status-list keys. Official direct and proxy requests race;
-the first valid response wins. Only official results are cached for up to 60 seconds.
-If no official response is available, verification returns unknown (exit 2).
+the first valid response wins. Only official results are cached for up to 10 minutes.
+With revocation checking enabled, an unavailable official response returns unknown
+(exit 2). `verify --skip-revocation <keybox>` validates locally and reports
+`RESULT: skipped (revocation)` on success; it does not report the keybox as not revoked.

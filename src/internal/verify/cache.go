@@ -20,7 +20,7 @@ import (
 
 const (
 	defaultStatusCache = "/data/adb/keybox-lite/status-cache"
-	statusCacheTTL     = 60 * time.Second
+	statusCacheTTL     = 10 * time.Minute
 	cacheLockTimeout   = 35 * time.Second
 	maxCacheBytes      = maxStatusBytes + 4096
 )
