@@ -33,6 +33,7 @@
     }
     if (targetsPage !== next) {
       targetsPage = next
+      if (!next) void ensureHome()
       void tick().then(() => window.scrollTo({ top: 0, behavior: "instant" }))
     }
     themeOpen = false
@@ -43,6 +44,7 @@
     event.preventDefault()
     if (targetManager && !targetManager.canLeave()) return
     targetsPage = false
+    void ensureHome()
     window.location.hash = "/"
     void tick().then(() => window.scrollTo({ top: 0, behavior: "instant" }))
   }
@@ -253,6 +255,23 @@
     }
   }
 
+  let resolvingDir: Promise<void> | undefined
+  function ensureDir(): Promise<void> {
+    if (moddir) return Promise.resolve()
+    if (!resolvingDir) resolvingDir = resolveDir().finally(() => { resolvingDir = undefined })
+    return resolvingDir
+  }
+  async function ensureHome() {
+    if (disposed || initialDone || busy !== null) return
+    await refresh()
+  }
+  async function initialize() {
+    if (!targetsPage) { await ensureHome(); return }
+    try { await ensureDir() } catch (cause) {
+      if (!disposed) error = cause instanceof Error ? cause.message : String(cause)
+    }
+  }
+
   async function resolveDir() {
     const r = await exec(
       'for d in /data/adb/modules/' + MODULE_ID + ' /data/adb/modules_update/' + MODULE_ID +
@@ -371,7 +390,7 @@
 
   async function refresh() {
     await run("refresh", async () => {
-      if (!moddir) await resolveDir()
+      await ensureDir()
       await reload()
     })
   }
@@ -542,7 +561,7 @@
     enableEdgeToEdge()
     window.addEventListener("hashchange", syncRoute)
     syncRoute()
-    void refresh()
+    void initialize()
     return () => {
       disposed = true
       updateMonitor?.abort()

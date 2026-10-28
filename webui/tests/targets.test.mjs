@@ -33,7 +33,7 @@ const plain = value => JSON.parse(JSON.stringify(value))
 const response = value => ({ errno: 0, stdout: JSON.stringify(value), stderr: "" })
 function fixture(overrides = {}) {
   return {
-    supported: true, backend: { backend: "tricky-store", identity: "TS", active: true },
+    supported: true, backend: { backend: "tricky-store", identity: "TS", active: true, module_id: "tricky_store" },
     config: {
       targets: [{ package_name: "com.alpha", mode: "auto" }],
       default_policy: { os_patch: "202501", future_field: "keep this" },
@@ -60,13 +60,13 @@ function harness(initial = fixture()) {
   const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1]
   runInNewContext(transpile(script + `
     export const handlers = {
-      entryChecked, entryStateLabel, canManageEntry, canLeave, refresh, save, setEntry, select, selectVisible, setMode, setPolicy, trackSystem, autoAdd, addManual, beforeUnload,
+      refreshEntry, entryChecked, entryStateLabel, canManageEntry, canLeave, refresh, save, setEntry, select, selectVisible, setMode, setPolicy, trackSystem, autoAdd, addManual, beforeUnload,
       openEditor, closeEditor, applyEditor, editPolicy, countChanges,
       toggleMenu, closeMenu, dismissMenu, menuKeydown, menuAction, openSheet, closeSheet, toggleSystem, applySystem, discard, loadMetadata,
       bindMenu: node => { menuElement = node },
       editorMode: mode => { editor.mode = mode },
       editorTracked: value => { editor.tracked = value },
-      state: () => ({ status, draft, baseline, ready, entryReady, pending, error, notice, editor, menuOpen, sheet, systemDraft, metadata, dirty: changed() }),
+      state: () => ({ status, draft, baseline, ready, entryReady, entry, entryBusy, entryError, entryNotice, saving, pending, error, notice, editor, menuOpen, sheet, systemDraft, metadata, dirty: changed() }),
       search: (text, kind = "all") => { query = text; filter = kind },
       // Mirror the component: rows are ordered by the selection captured on first load.
       visible: () => status && draft ? visiblePackages(status, draft, query, filter, metadata, initialSelection ?? undefined) : [],
@@ -80,12 +80,12 @@ function harness(initial = fixture()) {
       if (name === "svelte") return { onDestroy: fn => cleanups.push(fn), untrack: fn => fn() }
       if (name === "../bridge") return { exec(command) {
         calls.push(command)
-        return queue.length ? Promise.resolve(queue.shift()) : Promise.resolve(response(current))
+        return queue.length ? Promise.resolve(queue.shift()) : Promise.resolve(response(command.endsWith(" targets entry status") ? current.entry : current))
       } }
       if (name === "../i18n") return locale
       if (name === "../targets") return targets
       if (name === "../ui") return ui
-      if (name === "../apps") return { packagesInfo(names, signal) { metadataCalls.push({ names, signal }); return metadataQueue.length ? metadataQueue.shift() : Promise.resolve(new Map()) } }
+      if (name === "../apps") return { packagesInfo(names, signal, onBatch) { metadataCalls.push({ names, signal, onBatch }); return metadataQueue.length ? metadataQueue.shift() : Promise.resolve(new Map()) } }
       if (name === "../motion") return { surface: () => ({}), reveal: () => ({}), pageExit: () => ({}) }
       if (name === "./AppListSkeleton.svelte") return {}
       throw new Error(name)
@@ -397,19 +397,19 @@ test("a late old load cannot overwrite a newer context's successful load", async
 
 test("entry switches on then off its linked entry and operates on OMK/TEES without target support", async () => {
   for (const identity of ["TS", "OMK", "TEES"]) {
-    const initial = fixture({ supported: identity === "TS", backend: { backend: identity, identity, active: true } })
+    const initial = fixture({ supported: identity === "TS", backend: { backend: identity, identity, active: true, module_id: "tricky_store" } })
     const h = harness(initial)
     await h.refresh(false)
     const linked = { ...initial.entry, enabled: true, linked: true }
-    h.queue(response({ ok: true }), response({ ...initial, entry: linked }))
+    h.queue(response({ ok: true }), response(linked))
     await h.setEntry(true)
     assert.equal(h.calls[1], "'/module/bin/keybox' targets entry set on")
-    assert.equal(h.state().status.entry.linked, true)
-    assert.equal(h.state().notice, locale.messages.en.targetsEntryDone)
-    h.queue(response({ ok: true }), response(initial))
+    assert.equal(h.state().entry.linked, true)
+    assert.equal(h.state().entryNotice, locale.messages.en.targetsEntryDone)
+    h.queue(response({ ok: true }), response(initial.entry))
     await h.setEntry(false)
     assert.equal(h.calls[3], "'/module/bin/keybox' targets entry set off")
-    assert.equal(h.state().status.entry.enabled, false)
+    assert.equal(h.state().entry.enabled, false)
   }
 })
 
@@ -421,7 +421,7 @@ test("entry conflicts block enabling, allow disabling, protect edits and surface
     await h.refresh(false)
     await h.setEntry(true)
     assert.equal(h.calls.length, 1)
-    h.queue(response({ ok: true }), response(initial))
+    h.queue(response({ ok: true }), response(initial.entry))
     await h.setEntry(false)
     assert.equal(h.calls[1], "'/module/bin/keybox' targets entry set off")
   }
@@ -433,8 +433,8 @@ test("entry conflicts block enabling, allow disabling, protect edits and surface
   await h.refresh(false)
   h.queue({ errno: 1, stdout: '{"ok":true}', stderr: "entry conflict" })
   await h.setEntry(true)
-  assert.match(h.state().error, /entry conflict/)
-  assert.equal(h.state().status.entry.enabled, false)
+  assert.match(h.state().entryError, /entry conflict/)
+  assert.equal(h.state().entry.enabled, false)
   const inactive = harness(fixture({ backend: { backend: "TS", identity: "TS", active: false } }))
   await inactive.refresh(false)
   await inactive.setEntry(true)
@@ -446,12 +446,12 @@ test("an existing owned link can be enabled again after feature state is lost", 
   initial.entry.linked = true
   const h = harness(initial)
   await h.refresh(false)
-  h.queue(response({ ok: true }), response({ ...initial, entry: { ...initial.entry, enabled: true } }))
+  h.queue(response({ ok: true }), response({ ...initial.entry, enabled: true }))
   await h.setEntry(true)
   assert.equal(h.calls[1], "'/module/bin/keybox' targets entry set on")
-  assert.equal(h.state().status.entry.enabled, true)
-  assert.equal(h.state().status.entry.linked, true)
-  assert.equal(h.state().error, "")
+  assert.equal(h.state().entry.enabled, true)
+  assert.equal(h.state().entry.linked, true)
+  assert.equal(h.state().entryError, "")
 })
 
 test("entry cleanup survives inactive or missing backends and config/package errors", async () => {
@@ -467,11 +467,11 @@ test("entry cleanup survives inactive or missing backends and config/package err
     const h = harness(initial)
     await h.refresh(false)
     const cleaned = { ...initial, entry: { ...initial.entry, enabled: false, linked: false } }
-    h.queue(response({ ok: true }), response(cleaned))
+    h.queue(response({ ok: true }), response(cleaned.entry))
     await h.setEntry(false)
     assert.equal(h.calls[1], "'/module/bin/keybox' targets entry set off")
-    assert.equal(h.state().status.entry.enabled, false)
-    assert.equal(h.state().notice, locale.messages.en.targetsEntryDone)
+    assert.equal(h.state().entry.enabled, false)
+    assert.equal(h.state().entryNotice, locale.messages.en.targetsEntryDone)
   }
 })
 
@@ -481,7 +481,7 @@ test("entry switch removes an orphan even when its saved setting is off", async 
   const h = harness(initial)
   await h.refresh(false)
   assert.equal(h.entryChecked(), true)
-  h.queue(response({ ok: true }), response(fixture()))
+  h.queue(response({ ok: true }), response(fixture().entry))
   await h.setEntry(!h.entryChecked())
   assert.equal(h.calls[1], "'/module/bin/keybox' targets entry set off")
   assert.equal(h.entryChecked(), false)
@@ -494,22 +494,22 @@ test("entry failures reload partial changes and never optimistically toggle the 
   const h = harness(initial)
   await h.refresh(false)
   let finish
-  h.queue(new Promise(resolve => { finish = resolve }), response(initial))
+  h.queue(new Promise(resolve => { finish = resolve }), response(initial.entry))
   const off = h.setEntry(false)
   assert.equal(h.entryChecked(), true)
   assert.equal(h.canManageEntry(false), false)
   finish({ errno: 1, stdout: "", stderr: "unlink denied" })
   await off
   assert.equal(h.entryChecked(), true)
-  assert.match(h.state().error, /unlink denied/)
-  assert.equal(h.state().notice, "")
+  assert.match(h.state().entryError, /unlink denied/)
+  assert.equal(h.state().entryNotice, "")
   // A command can fail after removing the links but before persisting the setting.
   const partial = { ...initial, entry: { ...initial.entry, linked: false } }
-  h.queue({ errno: 1, stdout: "", stderr: "state write failed" }, response(partial))
+  h.queue({ errno: 1, stdout: "", stderr: "state write failed" }, response(partial.entry))
   await h.setEntry(false)
-  assert.equal(h.state().status.entry.linked, false)
+  assert.equal(h.state().entry.linked, false)
   assert.equal(h.entryStateLabel(), locale.messages.en.targetsEntryWaiting)
-  assert.match(h.state().error, /state write failed/)
+  assert.match(h.state().entryError, /state write failed/)
   assert.equal(h.canManageEntry(false), true)
 })
 
@@ -518,18 +518,18 @@ test("entry acknowledgement must match real links and an unreadable reload marks
   await h.refresh(false)
   const orphan = fixture()
   orphan.entry.linked = true
-  h.queue(response({ ok: true }), response(orphan))
+  h.queue(response({ ok: true }), response(orphan.entry))
   await h.setEntry(false)
   assert.equal(h.entryChecked(), true)
-  assert.ok(h.state().error)
-  assert.equal(h.state().notice, "")
+  assert.ok(h.state().entryError)
+  assert.equal(h.state().entryNotice, "")
   h.queue(response({ ok: true }), { errno: 1, stdout: "", stderr: "read failed" })
   await h.setEntry(false)
   assert.equal(h.state().entryReady, false)
   assert.equal(h.entryStateLabel(), locale.messages.en.targetsEntryUnknown)
   assert.equal(h.canManageEntry(false), false)
-  assert.equal(h.state().notice, "")
-  await h.refresh(false)
+  assert.equal(h.state().entryNotice, "")
+  await h.refreshEntry()
   assert.equal(h.entryChecked(), false)
   assert.equal(h.canManageEntry(true), true)
 })
@@ -575,11 +575,11 @@ test("stale save completion and failed entry reload cannot overwrite state or cl
   await pending
   assert.equal(h.state().status.revision, "fresh")
   assert.equal(h.calls.length, 3)
-  h.queue(response({ ok: true }), response(fixture())) // Entry remains off despite successful command exit.
+  h.queue(response({ ok: true }), response(fixture().entry)) // Entry remains off despite successful command exit.
   await h.setEntry(true)
-  assert.ok(h.state().error)
-  assert.equal(h.state().notice, "")
-  assert.equal(h.state().ready, false)
+  assert.ok(h.state().entryError)
+  assert.equal(h.state().entryNotice, "")
+  assert.equal(h.state().ready, true)
 })
 
 test("selected filtering and row mode always follow draft changes rather than loaded selection", async () => {
@@ -816,4 +816,216 @@ test("metadata searches labels and ignores errors, timed out responses, stale co
     assert.equal(current.metadataCalls[0].signal.aborted, true)
     assert.equal(current.timerCount(), 0)
   }
+})
+
+test("entry status has a strict standalone contract and quoted command", () => {
+  assert.deepEqual(plain(targets.parseTargetEntry(JSON.stringify(fixture().entry))), fixture().entry)
+  for (const value of [fixture(), null, {}, { ...fixture().entry, enabled: 1 }, { ...fixture().entry, module_id: 3 }])
+    assert.throws(() => targets.parseTargetEntry(JSON.stringify(value)))
+  assert.equal(targets.targetEntryStatusCommand("/a'b"), "'/a'\"'\"'b' targets entry status")
+})
+
+test("entry can open and finish while the application list is still loading", async () => {
+  const h = harness()
+  let finishList
+  h.queue(new Promise(resolve => { finishList = resolve }))
+  const list = h.refresh(false)
+  h.openSheet("entry")
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(h.state().sheet, "entry")
+  assert.equal(h.state().pending, true)
+  assert.equal(h.state().entryBusy, false)
+  assert.equal(h.state().entryReady, true)
+  assert.equal(h.entryStateLabel(), locale.messages.en.targetsEntryOff)
+  assert.equal(h.calls[1], "'/module/bin/keybox' targets entry status")
+  assert.equal(h.canManageEntry(true), false) // Entry alone cannot establish an active backend.
+  finishList(response(fixture({ entry: { ...fixture().entry, linked: true } })))
+  await list
+  assert.equal(h.entryChecked(), false) // Late full status cannot overwrite the independent read.
+  assert.equal(h.canManageEntry(true), true)
+})
+
+test("entry refresh preserves dirty draft, metadata, editor and list messages", async () => {
+  const h = harness()
+  await h.refresh(false)
+  h.autoAdd(true)
+  h.openEditor("com.alpha")
+  h.editorMode("hack")
+  h.metadataResult(Promise.resolve(new Map([["com.alpha", { label: "Alpha", icon: null }]])))
+  h.loadMetadata(["com.alpha"], "/module/bin/keybox")
+  await new Promise(resolve => setImmediate(resolve))
+  const before = h.state(), draft = plain(before.draft), editor = plain(before.editor)
+  let finish
+  h.queue(new Promise(resolve => { finish = resolve }))
+  const reading = h.refreshEntry()
+  assert.equal(h.state().pending, false)
+  assert.equal(h.state().ready, true)
+  assert.equal(h.state().entryBusy, true)
+  assert.equal(h.canLeave(), false)
+  finish(response({ ...fixture().entry, linked: true }))
+  await reading
+  assert.deepEqual(plain(h.state().draft), draft)
+  assert.deepEqual(plain(h.state().editor), editor)
+  assert.equal(h.state().baseline, before.baseline)
+  assert.equal(h.state().metadata, before.metadata)
+  assert.equal(h.state().notice, before.notice)
+  assert.equal(h.state().error, before.error)
+  assert.equal(h.state().dirty, true)
+  assert.equal(h.calls.at(-1), "'/module/bin/keybox' targets entry status")
+})
+
+test("entry reads and operations reject late contexts, disable and destroy results", async () => {
+  for (const operation of ["refreshEntry", "setEntry"]) {
+    for (const end of ["path", "disabled", "destroy"]) {
+      const h = harness()
+      await h.refresh(false)
+      let finish
+      h.queue(new Promise(resolve => { finish = resolve }))
+      const running = h[operation](true)
+      const count = h.calls.length
+      await h[operation](true)
+      assert.equal(h.calls.length, count)
+      if (end === "path") { h.context("/new/bin"); h.effect() }
+      if (end === "disabled") { h.context("/module/bin/keybox", true); h.effect() }
+      if (end === "destroy") h.dispose()
+      finish(response(operation === "setEntry" ? { ok: true } : { ...fixture().entry, linked: true }))
+      await running
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(h.entryChecked(), false)
+      assert.equal(h.state().entryNotice, "")
+      assert.equal(h.calls.filter(command => command.endsWith("entry status")).length, operation === "refreshEntry" ? 1 : 0)
+    }
+  }
+})
+
+test("entry read failure cannot poison list editing and backend mismatch blocks injection", async () => {
+  const h = harness()
+  await h.refresh(false)
+  h.queue({ errno: 1, stdout: "", stderr: "entry read failed" })
+  await h.refreshEntry()
+  assert.equal(h.state().entryReady, false)
+  assert.match(h.state().entryError, /entry read failed/)
+  assert.equal(h.state().error, "")
+  assert.equal(h.state().ready, true)
+  h.setMode("com.alpha", "hack")
+  assert.equal(h.state().draft.targets[0].mode, "hack")
+  const other = harness()
+  await other.refresh(false)
+  other.queue(response({ ...fixture().entry, module_id: "other_backend" }))
+  await other.refreshEntry()
+  assert.equal(other.canManageEntry(true), false)
+  assert.equal(other.canManageEntry(false), true)
+})
+
+test("save and entry writes exclude each other without conflating their busy state", async () => {
+  const h = harness()
+  await h.refresh(false)
+  let finish
+  h.queue(new Promise(resolve => { finish = resolve }))
+  const entry = h.setEntry(true)
+  h.autoAdd(true)
+  await h.save()
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.state().pending, false)
+  finish({ errno: 1, stdout: "", stderr: "failed" })
+  await entry
+  h.queue(new Promise(resolve => { finish = resolve }))
+  const saving = h.save()
+  assert.equal(h.state().saving, true)
+  assert.equal(h.state().entryBusy, false)
+  assert.equal(h.canManageEntry(false), false)
+  await h.setEntry(false)
+  assert.equal(h.calls.length, 4)
+  finish({ errno: 1, stdout: "", stderr: "save failed" })
+  await saving
+  assert.equal(h.state().saving, false)
+})
+
+test("package rows are available before metadata completion and batches obey cancellation guards", async () => {
+  assert.doesNotMatch(component, /catalogReady/)
+  assert.match(component, /\{#if ready\}\s*<VirtualList/)
+  for (const end of ["timeout", "path", "disabled", "destroy", "cleanup"]) {
+    const h = harness()
+    await h.refresh(false)
+    let finish
+    h.metadataResult(new Promise(resolve => { finish = resolve }))
+    const cleanup = h.loadMetadata(["com.alpha"], "/module/bin/keybox")
+    assert.equal(h.state().ready, true)
+    assert.ok(h.visible().length > 0)
+    assert.equal(h.state().metadata.size, 0)
+    const batch = new Map([["com.alpha", { label: "First batch", icon: null }]])
+    h.metadataCalls[0].onBatch(batch)
+    assert.equal(h.state().metadata, batch)
+    if (end === "timeout") h.expireMetadata()
+    if (end === "path") h.context("/other/bin")
+    if (end === "disabled") h.context("/module/bin/keybox", true)
+    if (end === "destroy") h.dispose()
+    if (end === "cleanup") cleanup()
+    const late = new Map([["com.alpha", { label: "Late", icon: null }]])
+    h.metadataCalls[0].onBatch(late)
+    finish(late)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(h.state().metadata, batch)
+    cleanup()
+    assert.equal(h.timerCount(), 0)
+  }
+})
+
+test("entry write readback preserves edits made in flight and ignores a late readback", async () => {
+  for (const stale of [false, true]) {
+    const h = harness()
+    await h.refresh(false)
+    let finish
+    h.queue(response({ ok: true }), new Promise(resolve => { finish = resolve }))
+    const operation = h.setEntry(true)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(h.calls.at(-1), "'/module/bin/keybox' targets entry status")
+    assert.equal(h.state().entryReady, false)
+    h.setMode("com.alpha", "hack")
+    if (stale) { h.context("/module/bin/keybox", true); h.effect() }
+    finish(response({ ...fixture().entry, enabled: true, linked: true }))
+    await operation
+    assert.equal(h.state().draft.targets[0].mode, "hack")
+    assert.equal(h.state().dirty, true)
+    assert.equal(h.entryChecked(), !stale)
+    assert.equal(h.state().entryNotice, stale ? "" : locale.messages.en.targetsEntryDone)
+    assert.equal(h.calls.length, 3)
+  }
+})
+
+test("list refresh finishes independently while the entry dialog is reading", async () => {
+  const h = harness()
+  await h.refresh(false)
+  let finishEntry
+  h.queue(new Promise(resolve => { finishEntry = resolve }))
+  h.openSheet("entry")
+  await h.refresh(false)
+  assert.equal(h.state().pending, false)
+  assert.equal(h.state().ready, true)
+  assert.equal(h.state().entryBusy, true)
+  assert.equal(h.state().sheet, "entry")
+  assert.equal(h.state().entryNotice, "")
+  finishEntry(response(fixture().entry))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(h.state().entryBusy, false)
+  assert.equal(h.state().notice, locale.messages.en.targetsRefreshed)
+  assert.equal(h.calls.filter(command => command.endsWith(" targets status")).length, 2)
+  assert.equal(h.calls.filter(command => command.endsWith(" targets entry status")).length, 1)
+})
+
+test("full refresh synchronizes entry only when no independent entry request intervenes", async () => {
+  const h = harness()
+  await h.refresh(false)
+  const linked = { ...fixture().entry, enabled: true, linked: true }
+  h.status(fixture({ entry: linked }))
+  await h.refresh(false)
+  assert.equal(h.entryChecked(), true)
+  let finish
+  h.queue(new Promise(resolve => { finish = resolve }))
+  const operation = h.setEntry(false)
+  assert.equal(h.entryStateLabel(), locale.messages.en.targetsEntryOn)
+  finish({ errno: 1, stdout: "", stderr: "failed" })
+  await operation
+  assert.equal(h.entryStateLabel(), locale.messages.en.targetsEntryOn)
+  assert.doesNotMatch(component, /\{#if entryNotice\}/)
 })

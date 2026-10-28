@@ -67,6 +67,18 @@ export function validDraft(value: unknown): value is TargetDraft {
       new Set(value.system_apps).size !== value.system_apps.length || typeof value.auto_add_new_apps !== "boolean") return false
   return true
 }
+export type TargetEntry = TargetStatus["entry"]
+function validEntry(value: unknown): value is TargetEntry {
+  return object(value) && typeof value.enabled === "boolean" &&
+    (value.module_id === null || typeof value.module_id === "string") &&
+    typeof value.linked === "boolean" && typeof value.has_own_webui === "boolean"
+}
+export function parseTargetEntry(raw: string): TargetEntry {
+  const value: unknown = JSON.parse(raw)
+  if (!validEntry(value)) throw new Error("Invalid targets entry JSON")
+  return value
+}
+export function targetEntryStatusCommand(bin: string): string { return shellQuote(bin) + " targets entry status" }
 export function parseTargetStatus(raw: string): TargetStatus {
   const value: unknown = JSON.parse(raw)
   if (!object(value) || typeof value.supported !== "boolean" ||
@@ -77,9 +89,7 @@ export function parseTargetStatus(raw: string): TargetStatus {
       !object(value.config) || !validDraft({ ...value.config, system_apps: value.system_apps, auto_add_new_apps: value.auto_add_new_apps }) ||
       !Array.isArray(value.packages) || !value.packages.every(item => validTarget(item) && object(item) &&
         typeof item.system === "boolean" && typeof item.selected === "boolean" && typeof item.installed === "boolean") ||
-      !uniqueNames(value.packages) || !object(value.entry) || typeof value.entry.enabled !== "boolean" ||
-      !(value.entry.module_id === null || typeof value.entry.module_id === "string") ||
-      typeof value.entry.linked !== "boolean" || typeof value.entry.has_own_webui !== "boolean" ||
+      !uniqueNames(value.packages) || !validEntry(value.entry) ||
       typeof value.revision !== "string" || !value.revision.trim() ||
       (value.config_error !== undefined && typeof value.config_error !== "string") ||
       (value.packages_error !== undefined && typeof value.packages_error !== "string")) throw new Error("Invalid targets status JSON")

@@ -15,6 +15,7 @@
   import {
     modes, policyKeys, validPackage, validDraft, validPolicy, validPolicyValue, parseTargetStatus, parseTargetAck,
     draftFromStatus, targetStatusCommand, targetSaveCommand, targetEntryCommand, visiblePackages,
+    parseTargetEntry, targetEntryStatusCommand, type TargetEntry,
     type TargetStatus, type TargetDraft, type TargetMode, type PolicyKey, type Policy,
   } from "../targets"
 
@@ -27,7 +28,12 @@
   let ready = $state(false)
   let entryReady = $state(false)
   let pending = $state(false)
-  let catalogReady = $state(false)
+  let entry = $state<TargetEntry | null>(null)
+  let entryBusy = $state(false)
+  let entryError = $state("")
+  let entryNotice = $state("")
+  let entrySequence = 0
+  let saving = $state(false)
   let error = $state("")
   let notice = $state("")
   let query = $state("")
@@ -80,7 +86,12 @@
       entryReady = false
       status = null
       initialSelection = null
-      catalogReady = false
+      entrySequence++
+      entry = null
+      entryBusy = false
+      entryError = ""
+      entryNotice = ""
+      saving = false
       metadata = new Map()
       draft = null
       baseline = ""
@@ -88,11 +99,12 @@
       notice = ""
     }
     if (disabled) { closeEditor(); closeSheet(); menuOpen = false }
+    if (disabled && entryBusy) { entrySequence++; entryBusy = false; entryReady = false }
     if (disabled && pending) {
+      saving = false
       sequence++
       pending = false
       ready = false
-      entryReady = false
     }
   })
   $effect(() => {
@@ -105,19 +117,19 @@
     const names = metadataNames, path = bin, blocked = disabled
     return untrack(() => names && path && !blocked ? loadMetadata(names.split("\n"), path) : undefined)
   })
-  onDestroy(() => { disposed = true; sequence++; metadataSequence++ })
+  onDestroy(() => { disposed = true; sequence++; entrySequence++; metadataSequence++ })
 
   function loadMetadata(names: string[], path: string) {
     const id = ++metadataSequence
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 6000)
-    void packagesInfo(names, controller.signal).then(value => {
+    const apply = (value: Map<string, { label: string; icon: string | null }>) => {
       if (!disposed && !controller.signal.aborted && id === metadataSequence && bin === path && !disabled) metadata = value
-    }).catch(() => {
-      if (!disposed && id === metadataSequence && bin === path) metadata = new Map()
+    }
+    void packagesInfo(names, controller.signal, apply).then(apply).catch(() => {
+      // Keep any batches already received when a later batch fails.
     }).finally(() => {
       clearTimeout(timer)
-      if (!disposed && id === metadataSequence && bin === path && !disabled) catalogReady = true
     })
     return () => { controller.abort(); clearTimeout(timer); if (id === metadataSequence) metadataSequence++ }
   }
@@ -179,6 +191,7 @@
     else if (["system", "global", "manual", "entry"].includes(action)) openSheet(action as NonNullable<typeof sheet>)
   }
   function openSheet(value: NonNullable<typeof sheet>) {
+    if (disposed || disabled || !bin) return
     if (value === "system" && (!canEdit() || !status || !draft)) return
     if (value === "system" && draft && status) {
       systemQuery = ""
@@ -191,6 +204,7 @@
       globalBaseline = JSON.stringify(globalPolicy)
     }
     sheet = value
+    if (value === "entry") void refreshEntry()
   }
   function closeSheet() { manualModeOpen = false; sheet = null }
   function sheetChanged() {
@@ -243,6 +257,7 @@
   }
 
   export function canLeave(): boolean {
+    if (entryBusy) { entryNotice = m.targetsPending; return false }
     if (pending) { notice = m.targetsPending; return false }
     return !(changed() || editorChanged() || sheetChanged()) || window.confirm(m.targetsLeave)
   }
@@ -296,7 +311,7 @@
 
   function changed(): boolean { return !!draft && JSON.stringify(draft) !== baseline }
   function beforeUnload(event: BeforeUnloadEvent) {
-    if (changed() || editorChanged() || sheetChanged() || pending) { event.preventDefault(); event.returnValue = "" }
+    if (changed() || editorChanged() || sheetChanged() || pending || entryBusy) { event.preventDefault(); event.returnValue = "" }
   }
   function live(id: number, path: string): boolean {
     return !disposed && sequence === id && bin === path && !disabled
@@ -311,11 +326,15 @@
     requireSuccess(result)
     try { return parseTargetStatus(result.stdout) } catch { throw new Error(m.targetsInvalid) }
   }
-  function accept(value: TargetStatus) {
+  function accept(value: TargetStatus, entryVersion?: number) {
     status = value
     onTitleChange?.(value.backend?.name || "Tricky Store")
-    if (!value.packages.length && !value.config.targets.length) catalogReady = true
-    entryReady = true
+    if (entryVersion === entrySequence && !entryBusy) {
+      entry = value.entry
+      entryReady = true
+      entryError = ""
+      entryNotice = ""
+    }
     ready = !value.config_error && !value.packages_error
     if (!ready) {
       error = [value.config_error, value.packages_error].filter(Boolean).join("\n")
@@ -330,22 +349,21 @@
     if (disabled || pending || !bin || disposed) return
     if (ask && (changed() || editorChanged() || sheetChanged()) && !window.confirm(m.targetsDiscard)) return
     closeEditor()
-    closeSheet()
-    const id = ++sequence, path = bin
+    if (sheet !== "entry") closeSheet()
+    const id = ++sequence, path = bin, entryVersion = entrySequence
     pending = true
     ready = false
-    entryReady = false
     error = ""
     notice = ""
     try {
       const value = await readStatus(path)
       if (!live(id, path)) return
-      accept(value)
+      accept(value, entryVersion)
       if (ready && !quiet) notice = m.targetsRefreshed
     } catch (cause) {
       if (live(id, path)) error = cause instanceof Error ? cause.message : m.targetsFailed
     } finally {
-      if (!disposed && sequence === id) pending = false
+      if (!disposed && sequence === id) { pending = false; saving = false }
     }
   }
   function canEdit(): boolean {
@@ -427,11 +445,12 @@
     if (canEdit() && draft) { draft.auto_add_new_apps = enabled; notice = "" }
   }
   async function save() {
-    if (!canEdit() || !status || !draft || editor || sheet || !changed()) return
+    if (!canEdit() || entryBusy || !status || !draft || editor || sheet || !changed()) return
     if (!validDraft(draft)) { error = m.targetsInvalid; return }
-    const id = ++sequence, path = bin
+    const id = ++sequence, path = bin, entryVersion = entrySequence
     const command = targetSaveCommand(path, status.revision, { ...draft, per_app_policy: supportsAppPolicy() ? draft.per_app_policy : {} })
     pending = true
+    saving = true
     error = ""
     notice = ""
     try {
@@ -440,53 +459,81 @@
       requireSuccess(result)
       // A successful command must be followed by a valid fresh revision before another save.
       ready = false
-      entryReady = false
       try { parseTargetAck(result.stdout) } catch { throw new Error(m.targetsInvalid) }
       const value = await readStatus(path)
       if (!live(id, path)) return
-      accept(value)
+      accept(value, entryVersion)
       if (ready) notice = m.targetsSaved
     } catch (cause) {
       if (live(id, path)) error = cause instanceof Error ? cause.message : m.targetsFailed
     } finally {
-      if (!disposed && sequence === id) pending = false
+      if (!disposed && sequence === id) { pending = false; saving = false }
+    }
+  }
+  function entryLive(id: number, path: string): boolean {
+    return !disposed && entrySequence === id && bin === path && !disabled
+  }
+  async function readEntry(path: string): Promise<TargetEntry> {
+    const result = await exec(targetEntryStatusCommand(path))
+    requireSuccess(result)
+    try { return parseTargetEntry(result.stdout) } catch { throw new Error(m.targetsInvalid) }
+  }
+  async function refreshEntry() {
+    if (disposed || disabled || entryBusy || !bin) return
+    const id = ++entrySequence, path = bin
+    entryBusy = true
+    entryReady = false
+    entryError = ""
+    entryNotice = ""
+    try {
+      const value = await readEntry(path)
+      if (!entryLive(id, path)) return
+      entry = value
+      entryReady = true
+    } catch (cause) {
+      if (entryLive(id, path)) entryError = cause instanceof Error ? cause.message : m.targetsFailed
+    } finally {
+      if (!disposed && entrySequence === id) { entryBusy = false; entryNotice = "" }
     }
   }
   function canManageEntry(enabled: boolean): boolean {
-    return !disposed && !disabled && !pending && entryReady && !!bin && !!status && !changed() &&
-      (!enabled || (!!status.backend?.active && !status.entry.has_own_webui))
+    return !disposed && !disabled && !saving && !entryBusy && !changed() && entryReady && !!bin && !!entry &&
+      (!enabled || (!!status?.backend?.active && !!status.backend.module_id &&
+        status.backend.module_id === entry.module_id && !entry.has_own_webui))
   }
-  function entryChecked(): boolean { return !!status && (status.entry.enabled || status.entry.linked) }
+  function entryChecked(): boolean { return !!entry && (entry.enabled || entry.linked) }
   function entryStateLabel(): string {
-    if (!entryReady && !pending) return m.targetsEntryUnknown
-    if (status?.entry.linked) return m.targetsEntryOn
-    return status?.entry.enabled ? m.targetsEntryWaiting : m.targetsEntryOff
+    if (!entryReady && !entryBusy) return m.targetsEntryUnknown
+    if (!entry && entryBusy) return m.loading
+    if (entry?.linked) return m.targetsEntryOn
+    return entry?.enabled ? m.targetsEntryWaiting : m.targetsEntryOff
   }
   async function setEntry(enabled: boolean) {
-    if (!canManageEntry(enabled) || !status) return
-    const id = ++sequence, path = bin
-    pending = true
-    error = ""
-    notice = ""
+    if (!canManageEntry(enabled)) return
+    const id = ++entrySequence, path = bin
+    entryBusy = true
+    entryError = ""
+    entryNotice = ""
     entryReady = false
     try {
       const result = await exec(targetEntryCommand(path, enabled))
-      if (!live(id, path)) return
-      // Even a failed command may have removed links before persistence failed.
-      const value = await readStatus(path)
-      if (!live(id, path)) return
-      accept(value)
+      if (!entryLive(id, path)) return
+      // A failed command may have removed links before persistence failed.
+      const value = await readEntry(path)
+      if (!entryLive(id, path)) return
+      entry = value
+      entryReady = true
       requireSuccess(result)
       try { parseTargetAck(result.stdout) } catch { throw new Error(m.targetsInvalid) }
-      if (value.entry.enabled !== enabled || value.entry.linked !== enabled) throw new Error(m.targetsFailed)
-      notice = m.targetsEntryDone
+      if (value.enabled !== enabled || value.linked !== enabled) throw new Error(m.targetsFailed)
+      entryNotice = m.targetsEntryDone
     } catch (cause) {
-      if (live(id, path)) {
-        ready = false
-        error = cause instanceof Error ? cause.message : m.targetsFailed
+      if (entryLive(id, path)) {
+        entryNotice = ""
+        entryError = cause instanceof Error ? cause.message : m.targetsFailed
       }
     } finally {
-      if (!disposed && sequence === id) pending = false
+      if (!disposed && entrySequence === id) entryBusy = false
     }
   }
 </script>
@@ -508,7 +555,7 @@
         { value: "auto", label: m.targetsAutoAdd, icon: PackagePlus, blocked: !editable },
         { value: "global", label: m.targetsGlobalPolicy, icon: SlidersHorizontal, blocked: !editable || !supportsGlobalPolicy() },
         { value: "manual", label: m.targetsManual, icon: ListPlus, blocked: !editable },
-        { value: "entry", label: m.targetsEntry, icon: Settings2, blocked: !status }
+        { value: "entry", label: m.targetsEntry, icon: Settings2, blocked: disabled || !bin }
       ] as option}
         {#if ["system", "global", "entry"].includes(option.value)}<div class="target-menu-divider" role="separator"></div>{/if}
         <button type="button" class="target-menu-item"
@@ -576,7 +623,7 @@
         <span class="shrink-0 text-[11px] tabular-nums text-[var(--muted)]" aria-live="polite">{m.targetsSelected} {draft.targets.length}</span>
       </div>
       </div>
-      {#if catalogReady}
+      {#if ready}
         <VirtualList items={visible} getKey={(item) => item.package_name} estimateSize={68}>
           {#snippet item(app)}
             <div class="pb-1">
@@ -592,7 +639,7 @@
       {:else}
         <AppListSkeleton />
       {/if}
-      {#if catalogReady && !visible.length}<p class="page-enter py-4 text-center text-[var(--muted)]">{m.targetsEmpty}</p>{/if}
+      {#if ready && !visible.length}<p class="page-enter py-4 text-center text-[var(--muted)]">{m.targetsEmpty}</p>{/if}
       <div class="target-fab-bar">
         <div class="pointer-events-auto flex items-end justify-end">
           {#if dirty}
@@ -614,7 +661,7 @@
 
 {#if sheet}
   <Modal title={sheet === "system" ? m.targetsSystemApps : sheet === "global" ? m.targetsGlobalPolicy : sheet === "manual" ? m.targetsManual : m.targetsEntry}
-    closeLabel={m.targetsClose} busy={pending} hideFooter={sheet === "entry"} onclose={closeSheet} bind:contentElement={systemScroll}>
+    closeLabel={m.targetsClose} busy={sheet === "entry" ? entryBusy : pending} hideFooter={sheet === "entry"} onclose={closeSheet} bind:contentElement={systemScroll}>
     {#if sheet === "system"}
       <div class="target-modal-search">
         <input type="search" class="{inputClass} w-full" aria-label={m.targetsSearch} placeholder={m.targetsSearch} bind:value={systemQuery} />
@@ -651,36 +698,36 @@
         {/if}
         {#if error}<p role="alert" class="text-[var(--red)]">{error}</p>{/if}
       </fieldset>
-    {:else if sheet === "entry" && status}
+    {:else if sheet === "entry"}
       <p class="text-[11px] leading-relaxed text-[var(--muted)]">{m.targetsEntryHint}</p>
       <div class="entry-controls mt-2">
         <div class="min-w-0">
-          <p class="text-xs font-medium [overflow-wrap:anywhere]">{status.backend?.name || status.entry.module_id || status.backend?.identity || m.targetsEntry}</p>
+          <p class="text-xs font-medium [overflow-wrap:anywhere]">{entry?.module_id || status?.backend?.name || status?.backend?.identity || m.targetsEntry}</p>
           <div id={componentId + "-entry-status"} role="status" aria-live="polite" class="entry-status">
             {#key entryStateLabel()}<span in:surface={{ y: 0, scale: 1, duration: 160 }}>{entryStateLabel()}</span>{/key}
           </div>
         </div>
         <button type="button" class="entry-action" class:is-remove={entryReady && entryChecked()}
-          aria-describedby={componentId + "-entry-status"} aria-busy={pending}
-          disabled={pending || (!entryReady ? locked : !canManageEntry(!entryChecked()))}
-          onclick={() => !entryReady ? refresh() : setEntry(!entryChecked())}>
+          aria-describedby={componentId + "-entry-status"} aria-busy={entryBusy}
+          disabled={entryBusy || (!entryReady ? disabled || !bin : !canManageEntry(!entryChecked()))}
+          onclick={() => !entryReady ? refreshEntry() : setEntry(!entryChecked())}>
           <span class="entry-action-icon" aria-hidden="true">
-            {#if pending}<Loader2 size={14} class="motion-safe:animate-spin" />
+            {#if entryBusy}<Loader2 size={14} class="motion-safe:animate-spin" />
             {:else}<span class="grid" in:surface={{ y: 0, scale: .9, duration: 120 }}>
               {#if !entryReady}<RefreshCw size={14} />{:else if entryChecked()}<Unlink size={14} />{:else}<Link2 size={14} />{/if}
             </span>{/if}
           </span>
           <span class="entry-action-label">
             {#each [m.targetsEntryInject, m.targetsEntryRemove, m.refresh, m.loading] as label}
-              <span class:invisible={label !== (pending ? m.loading : !entryReady ? m.refresh : entryChecked() ? m.targetsEntryRemove : m.targetsEntryInject)}
-                aria-hidden={label !== (pending ? m.loading : !entryReady ? m.refresh : entryChecked() ? m.targetsEntryRemove : m.targetsEntryInject)}>{label}</span>
+              <span class:invisible={label !== (entryBusy ? m.loading : !entryReady ? m.refresh : entryChecked() ? m.targetsEntryRemove : m.targetsEntryInject)}
+                aria-hidden={label !== (entryBusy ? m.loading : !entryReady ? m.refresh : entryChecked() ? m.targetsEntryRemove : m.targetsEntryInject)}>{label}</span>
             {/each}
           </span>
         </button>
       </div>
       {#if dirty}<p class="mt-1.5 text-[11px] text-[var(--muted)]">{m.targetsEntrySaveFirst}</p>{/if}
-      {#if error}<p role="alert" class="mt-2 whitespace-pre-wrap text-[var(--red)]" transition:slide={{ duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 160 }}>{error}</p>{/if}
-      {#if status.entry.has_own_webui}<p class="mt-1 text-[var(--muted)]">{m.targetsOwnWebui}</p>{/if}
+      {#if entryError}<p role="alert" class="mt-2 whitespace-pre-wrap text-[var(--red)]" transition:slide={{ duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 160 }}>{entryError}</p>{/if}
+      {#if entry?.has_own_webui}<p class="mt-1 text-[var(--muted)]">{m.targetsOwnWebui}</p>{/if}
     {/if}
     {#snippet footer(requestClose)}
       <button type="button" class="{ui.button} min-w-[88px] border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]"
