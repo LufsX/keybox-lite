@@ -46,6 +46,19 @@ func (d *disk) lstatEntry(p string) (snapshot, bool, error) {
 }
 func (m *manager) entryStatus(st state, t *backend.Target) (Entry, error) {
 	e := Entry{Enabled: st.Entry}
+	// Off removes entries from every backend, including leftover Magisk actions.
+	// Report the same scope so a lost setting or backend switch cannot hide them.
+	for _, id := range backendIDs {
+		for _, name := range []string{"webroot", "action.sh"} {
+			s, native, err := m.disk.lstatEntry("/data/adb/modules/" + id + "/" + name)
+			if err != nil {
+				return e, err
+			}
+			if s.Exists && !native && s.Link == m.linkSource(name) {
+				e.Linked = true
+			}
+		}
+	}
 	if t == nil {
 		return e, nil
 	}
@@ -55,8 +68,7 @@ func (m *manager) entryStatus(st state, t *backend.Target) (Entry, error) {
 	if err != nil {
 		return e, err
 	}
-	e.Linked = s.Exists && !native && s.Link == m.linkSource("webroot")
-	e.HasOwnWebUI = s.Exists && !e.Linked
+	e.HasOwnWebUI = s.Exists && (native || s.Link != m.linkSource("webroot"))
 	return e, nil
 }
 func (m *manager) hasMagisk() (bool, error) {

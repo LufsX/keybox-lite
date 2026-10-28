@@ -27,6 +27,6 @@ help:
 	@echo 'Keybox Lite targets:'
 	@echo '  make build      Go binary (arm64 static) + UPX'
 	@echo '  make webui      build the Svelte WebUI into webroot/'
-	@echo '  make package    build everything -> dist/keybox-lite-$(VERSION).zip'
+	@echo '  make package    build everything -> dist/keybox-lite-$(VERSION)-<versionCode>.zip'
 	@echo '  make clean      remove build outputs'
 	@echo '  make distclean  also remove webui/node_modules'

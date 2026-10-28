@@ -10,11 +10,12 @@
     onclose: () => void
     children: Snippet
     footer?: Snippet<[requestClose: () => void]>
+    hideFooter?: boolean
     contentElement?: HTMLDivElement
   }
 
   let {
-    title, description, closeLabel = "Close", busy = false, onclose, children, footer,
+    title, description, closeLabel = "Close", busy = false, onclose, children, footer, hideFooter = false,
     contentElement = $bindable(),
   }: Props = $props()
 
@@ -140,14 +141,14 @@
       <h2 id={id + "-title"}>{title}</h2>
       {#if description}<p id={id + "-description"}>{description}</p>{/if}
     </div>
-    <button bind:this={closeButton} type="button" class={ui.iconButton} aria-label={closeLabel} title={closeLabel} disabled={busy || closing} onclick={requestClose}>
+    <button bind:this={closeButton} type="button" class={"modal-close " + ui.iconButton} aria-label={closeLabel} title={closeLabel} disabled={busy || closing} onclick={requestClose}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
     </button>
   </header>
   <div class="body" data-modal-scroll bind:this={contentElement}>
     {@render children()}
   </div>
-  {#if footer}
+  {#if footer && !hideFooter}
     <footer>{@render footer(requestClose)}</footer>
   {/if}
 </dialog>
@@ -165,7 +166,7 @@
     padding: 0;
     overflow: hidden;
     border: 1px solid var(--line);
-    border-radius: 14px;
+    border-radius: 10px;
     background: var(--panel);
     color: var(--text);
     font-size: 12px;
@@ -178,14 +179,15 @@
   header {
     display: flex;
     flex: 0 0 auto;
-    align-items: flex-start;
-    gap: 8px;
-    padding: var(--content-padding);
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--line);
   }
   .heading { flex: 1; min-width: 0; }
   h2 { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
-  p { margin: 4px 0 0; color: var(--muted); overflow-wrap: anywhere; }
+  .modal-close { width: 28px; height: 28px; padding: 4px; border-radius: 6px; }
+  p { margin: 2px 0 0; color: var(--muted); overflow-wrap: anywhere; }
   button:disabled { opacity: .48; cursor: default; }
   .body { flex: 1 1 auto; min-height: 0; padding: var(--content-padding); overflow: auto; overscroll-behavior: contain; scroll-padding-top: calc(32px + 2 * var(--content-padding)); scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
   footer {
@@ -194,10 +196,11 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 6px;
-    padding: var(--content-padding);
+    padding: 6px 10px;
     border-top: 1px solid var(--line);
     background: var(--inset);
   }
+  footer :global(button) { min-height: 32px; min-width: 64px; padding: 4px 10px; border-radius: 6px; font-size: 12px; }
   .modal[data-closing="true"] { animation: modal-exit 150ms ease-in both; }
   .modal[data-closing="true"]::backdrop { animation: backdrop-exit 150ms ease-in both; }
   .modal[data-reduced-motion="true"], .modal[data-reduced-motion="true"]::backdrop { animation-duration: 0ms; }

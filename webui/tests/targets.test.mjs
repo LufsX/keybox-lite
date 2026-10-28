@@ -60,13 +60,13 @@ function harness(initial = fixture()) {
   const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1]
   runInNewContext(transpile(script + `
     export const handlers = {
-      canLeave, refresh, save, setEntry, select, selectVisible, setMode, setPolicy, trackSystem, autoAdd, addManual, beforeUnload,
+      entryChecked, entryStateLabel, canManageEntry, canLeave, refresh, save, setEntry, select, selectVisible, setMode, setPolicy, trackSystem, autoAdd, addManual, beforeUnload,
       openEditor, closeEditor, applyEditor, editPolicy, countChanges,
       toggleMenu, closeMenu, dismissMenu, menuKeydown, menuAction, openSheet, closeSheet, toggleSystem, applySystem, discard, loadMetadata,
       bindMenu: node => { menuElement = node },
       editorMode: mode => { editor.mode = mode },
       editorTracked: value => { editor.tracked = value },
-      state: () => ({ status, draft, baseline, ready, pending, error, notice, editor, menuOpen, sheet, systemDraft, metadata, dirty: changed() }),
+      state: () => ({ status, draft, baseline, ready, entryReady, pending, error, notice, editor, menuOpen, sheet, systemDraft, metadata, dirty: changed() }),
       search: (text, kind = "all") => { query = text; filter = kind },
       // Mirror the component: rows are ordered by the selection captured on first load.
       visible: () => status && draft ? visiblePackages(status, draft, query, filter, metadata, initialSelection ?? undefined) : [],
@@ -473,6 +473,65 @@ test("entry cleanup survives inactive or missing backends and config/package err
     assert.equal(h.state().status.entry.enabled, false)
     assert.equal(h.state().notice, locale.messages.en.targetsEntryDone)
   }
+})
+
+test("entry switch removes an orphan even when its saved setting is off", async () => {
+  const initial = fixture()
+  initial.entry.linked = true
+  const h = harness(initial)
+  await h.refresh(false)
+  assert.equal(h.entryChecked(), true)
+  h.queue(response({ ok: true }), response(fixture()))
+  await h.setEntry(!h.entryChecked())
+  assert.equal(h.calls[1], "'/module/bin/keybox' targets entry set off")
+  assert.equal(h.entryChecked(), false)
+  assert.equal(h.entryStateLabel(), locale.messages.en.targetsEntryOff)
+})
+
+test("entry failures reload partial changes and never optimistically toggle the switch", async () => {
+  const initial = fixture()
+  initial.entry = { ...initial.entry, enabled: true, linked: true }
+  const h = harness(initial)
+  await h.refresh(false)
+  let finish
+  h.queue(new Promise(resolve => { finish = resolve }), response(initial))
+  const off = h.setEntry(false)
+  assert.equal(h.entryChecked(), true)
+  assert.equal(h.canManageEntry(false), false)
+  finish({ errno: 1, stdout: "", stderr: "unlink denied" })
+  await off
+  assert.equal(h.entryChecked(), true)
+  assert.match(h.state().error, /unlink denied/)
+  assert.equal(h.state().notice, "")
+  // A command can fail after removing the links but before persisting the setting.
+  const partial = { ...initial, entry: { ...initial.entry, linked: false } }
+  h.queue({ errno: 1, stdout: "", stderr: "state write failed" }, response(partial))
+  await h.setEntry(false)
+  assert.equal(h.state().status.entry.linked, false)
+  assert.equal(h.entryStateLabel(), locale.messages.en.targetsEntryWaiting)
+  assert.match(h.state().error, /state write failed/)
+  assert.equal(h.canManageEntry(false), true)
+})
+
+test("entry acknowledgement must match real links and an unreadable reload marks status unknown", async () => {
+  const h = harness()
+  await h.refresh(false)
+  const orphan = fixture()
+  orphan.entry.linked = true
+  h.queue(response({ ok: true }), response(orphan))
+  await h.setEntry(false)
+  assert.equal(h.entryChecked(), true)
+  assert.ok(h.state().error)
+  assert.equal(h.state().notice, "")
+  h.queue(response({ ok: true }), { errno: 1, stdout: "", stderr: "read failed" })
+  await h.setEntry(false)
+  assert.equal(h.state().entryReady, false)
+  assert.equal(h.entryStateLabel(), locale.messages.en.targetsEntryUnknown)
+  assert.equal(h.canManageEntry(false), false)
+  assert.equal(h.state().notice, "")
+  await h.refresh(false)
+  assert.equal(h.entryChecked(), false)
+  assert.equal(h.canManageEntry(true), true)
 })
 
 test("TS-L keeps global policies and modes while rejecting per-app edits and UID system tracking", async () => {

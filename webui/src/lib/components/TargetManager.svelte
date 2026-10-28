@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onDestroy, untrack } from "svelte"
-  import { Search, KeyRound, ChevronRight, ChevronDown, NotebookPen, Undo2, PackagePlus, RefreshCw, ListPlus, SlidersHorizontal, SquareDashed, CheckCheck, Settings2 } from "lucide-svelte"
+  import { slide } from "svelte/transition"
+  import { Link2, Unlink, Loader2, Search, KeyRound, ChevronRight, ChevronDown, NotebookPen, Undo2, PackagePlus, RefreshCw, ListPlus, SlidersHorizontal, SquareDashed, CheckCheck, Settings2 } from "lucide-svelte"
   import { packagesInfo } from "../apps"
   import AppRow from "./AppRow.svelte"
   import AppListSkeleton from "./AppListSkeleton.svelte"
   import Modal from "./Modal.svelte"
+  import Dropdown from "./Dropdown.svelte"
   import VirtualList from "./VirtualList.svelte"
   import { exec, type ExecResult } from "../bridge"
   import { messages, type Locale } from "../i18n"
@@ -32,6 +34,7 @@
   let filter = $state("listed")
   let manual = $state("")
   let manualMode = $state<TargetMode>("auto")
+  let manualModeOpen = $state(false)
   let editor = $state<{ name: string; mode: TargetMode; policy: Policy; tracked: boolean } | null>(null)
   let editorBaseline = ""
   let advancedOpen = $state(false)
@@ -189,7 +192,7 @@
     }
     sheet = value
   }
-  function closeSheet() { sheet = null }
+  function closeSheet() { manualModeOpen = false; sheet = null }
   function sheetChanged() {
     return (sheet === "system" && JSON.stringify(systemDraft) !== systemBaseline) ||
       (sheet === "global" && JSON.stringify(globalPolicy) !== globalBaseline)
@@ -453,23 +456,29 @@
     return !disposed && !disabled && !pending && entryReady && !!bin && !!status && !changed() &&
       (!enabled || (!!status.backend?.active && !status.entry.has_own_webui))
   }
+  function entryChecked(): boolean { return !!status && (status.entry.enabled || status.entry.linked) }
+  function entryStateLabel(): string {
+    if (!entryReady && !pending) return m.targetsEntryUnknown
+    if (status?.entry.linked) return m.targetsEntryOn
+    return status?.entry.enabled ? m.targetsEntryWaiting : m.targetsEntryOff
+  }
   async function setEntry(enabled: boolean) {
     if (!canManageEntry(enabled) || !status) return
     const id = ++sequence, path = bin
     pending = true
     error = ""
     notice = ""
+    entryReady = false
     try {
       const result = await exec(targetEntryCommand(path, enabled))
       if (!live(id, path)) return
-      requireSuccess(result)
-      ready = false
-      entryReady = false
-      try { parseTargetAck(result.stdout) } catch { throw new Error(m.targetsInvalid) }
+      // Even a failed command may have removed links before persistence failed.
       const value = await readStatus(path)
       if (!live(id, path)) return
-      if (value.entry.enabled !== enabled) throw new Error(m.targetsFailed)
       accept(value)
+      requireSuccess(result)
+      try { parseTargetAck(result.stdout) } catch { throw new Error(m.targetsInvalid) }
+      if (value.entry.enabled !== enabled || value.entry.linked !== enabled) throw new Error(m.targetsFailed)
       notice = m.targetsEntryDone
     } catch (cause) {
       if (live(id, path)) {
@@ -605,7 +614,7 @@
 
 {#if sheet}
   <Modal title={sheet === "system" ? m.targetsSystemApps : sheet === "global" ? m.targetsGlobalPolicy : sheet === "manual" ? m.targetsManual : m.targetsEntry}
-    closeLabel={m.targetsClose} busy={pending} onclose={closeSheet} bind:contentElement={systemScroll}>
+    closeLabel={m.targetsClose} busy={pending} hideFooter={sheet === "entry"} onclose={closeSheet} bind:contentElement={systemScroll}>
     {#if sheet === "system"}
       <div class="target-modal-search">
         <input type="search" class="{inputClass} w-full" aria-label={m.targetsSearch} placeholder={m.targetsSearch} bind:value={systemQuery} />
@@ -631,21 +640,46 @@
         <input class={inputClass} aria-label={m.targetsManual} placeholder={m.targetsManual} bind:value={manual}
           onkeydown={(event) => { if (event.key === "Enter") { event.preventDefault(); addManual() } }} />
         {#if supportsModes()}
-          <select class={inputClass} aria-label={m.targetsMode} bind:value={manualMode}>
-            {#each modes as mode}<option value={mode}>{modeLabel(mode)}</option>{/each}
-          </select>
+          <div class="manual-mode-picker">
+            <Dropdown id={componentId + "-manual-mode"} label={m.targetsMode}
+              options={modes.map(value => ({ value, label: modeLabel(value) }))} selected={manualMode}
+              open={manualModeOpen} disabled={!editable} triggerClass={ui.selectButton + " w-full"}
+              onOpenChange={(open) => manualModeOpen = open} onSelect={(value) => manualMode = value}>
+              {#snippet trigger()}<span>{modeLabel(manualMode)}</span><ChevronDown size={14} />{/snippet}
+            </Dropdown>
+          </div>
         {/if}
         {#if error}<p role="alert" class="text-[var(--red)]">{error}</p>{/if}
       </fieldset>
     {:else if sheet === "entry" && status}
-      <label class="flex min-h-10 items-center gap-2 rounded-[10px] bg-[var(--inset)] px-2"><input type="checkbox" class="ui-check" checked={status.entry.enabled}
-        disabled={!canManageEntry(!status.entry.enabled)} onchange={(event) => setEntry(event.currentTarget.checked)} />{m.targetsEntry}</label>
-      <div role="status" class="mt-2 flex min-h-6 items-center gap-1.5 text-[var(--muted)]">
-        {notice}
+      <p class="text-[11px] leading-relaxed text-[var(--muted)]">{m.targetsEntryHint}</p>
+      <div class="entry-controls mt-2">
+        <div class="min-w-0">
+          <p class="text-xs font-medium [overflow-wrap:anywhere]">{status.backend?.name || status.entry.module_id || status.backend?.identity || m.targetsEntry}</p>
+          <div id={componentId + "-entry-status"} role="status" aria-live="polite" class="entry-status">
+            {#key entryStateLabel()}<span in:surface={{ y: 0, scale: 1, duration: 160 }}>{entryStateLabel()}</span>{/key}
+          </div>
+        </div>
+        <button type="button" class="entry-action" class:is-remove={entryReady && entryChecked()}
+          aria-describedby={componentId + "-entry-status"} aria-busy={pending}
+          disabled={pending || (!entryReady ? locked : !canManageEntry(!entryChecked()))}
+          onclick={() => !entryReady ? refresh() : setEntry(!entryChecked())}>
+          <span class="entry-action-icon" aria-hidden="true">
+            {#if pending}<Loader2 size={14} class="motion-safe:animate-spin" />
+            {:else}<span class="grid" in:surface={{ y: 0, scale: .9, duration: 120 }}>
+              {#if !entryReady}<RefreshCw size={14} />{:else if entryChecked()}<Unlink size={14} />{:else}<Link2 size={14} />{/if}
+            </span>{/if}
+          </span>
+          <span class="entry-action-label">
+            {#each [m.targetsEntryInject, m.targetsEntryRemove, m.refresh, m.loading] as label}
+              <span class:invisible={label !== (pending ? m.loading : !entryReady ? m.refresh : entryChecked() ? m.targetsEntryRemove : m.targetsEntryInject)}
+                aria-hidden={label !== (pending ? m.loading : !entryReady ? m.refresh : entryChecked() ? m.targetsEntryRemove : m.targetsEntryInject)}>{label}</span>
+            {/each}
+          </span>
+        </button>
       </div>
-      {#if error}<p role="alert" class="mt-2 whitespace-pre-wrap text-[var(--red)]">{error}</p>{/if}
-      {#if status.entry.module_id}<p class="mt-2 font-mono text-[11px] text-[var(--muted)]">{status.entry.module_id}</p>{/if}
-      {#if status.entry.linked}<p class="mt-1 text-[var(--muted)]">{m.targetsLinked}</p>{/if}
+      {#if dirty}<p class="mt-1.5 text-[11px] text-[var(--muted)]">{m.targetsEntrySaveFirst}</p>{/if}
+      {#if error}<p role="alert" class="mt-2 whitespace-pre-wrap text-[var(--red)]" transition:slide={{ duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 160 }}>{error}</p>{/if}
       {#if status.entry.has_own_webui}<p class="mt-1 text-[var(--muted)]">{m.targetsOwnWebui}</p>{/if}
     {/if}
     {#snippet footer(requestClose)}
@@ -723,3 +757,17 @@
     {/each}
   </div>
 {/snippet}
+<style>
+  .manual-mode-picker :global([role="group"]) { position: relative; inset: auto; width: 100%; max-width: none; margin-top: 4px; box-shadow: none; }
+  .entry-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .entry-status { margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+  .entry-action { position: relative; flex-shrink: 0; min-height: 32px; padding: 4px 10px 4px 24px; border: 1px solid var(--line); border-radius: 6px; background: var(--accent-bg); color: var(--accent); font-size: 12px; transition: background-color 160ms, color 160ms, opacity 160ms, transform 160ms; }
+  .entry-action.is-remove { background: var(--inset); color: var(--text); }
+  .entry-action:disabled:not([aria-busy="true"]) { opacity: .5; }
+  .entry-action:active:not(:disabled) { transform: scale(.98); }
+  .entry-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .entry-action-icon { position: absolute; left: 6px; top: 50%; display: grid; width: 14px; height: 14px; place-items: center; transform: translateY(-50%); }
+  .entry-action-label { display: grid; }
+  .entry-action-label > span { grid-area: 1 / 1; }
+  @media (max-width: 359px) { .entry-controls { gap: 6px; } }
+</style>

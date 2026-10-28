@@ -5,3 +5,4 @@ bin/keyboxlite
 bin/keyboxlite.upx
 /icon.png
 *.DS_Store
+/.release.local.json

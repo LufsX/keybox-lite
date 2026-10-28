@@ -20,6 +20,7 @@ function harness(t, savedSource = null, savedSkip = "0") {
   const timers = new Set()
   let storedSource = savedSource ?? "auto"
   let storedSkip = savedSkip
+  let storedSchedule = "off"
   let settingsFailure = false
   let mount
   const media = { matches: false, addEventListener() {}, removeEventListener() {} }
@@ -33,7 +34,8 @@ function harness(t, savedSource = null, savedSkip = "0") {
   const targetDisabled = app.match(/<TargetManager\b[^>]*disabled=\{([^}]+)\}/)[1]
   const hooks = `
     export const handlers = {
-      update, stopUpdate, appendOutput, setSource, setSkipRevocation, loadMeta,
+      update, stopUpdate, appendOutput, setSource, setSkipRevocation, loadMeta, setSchedule,
+      scheduleState: () => ({ saved: schedule, pending: scheduleChoice }),
       skipsRevocation: () => skipRevocation,
       openTargets: () => { window.location.hash = "#/targets"; syncRoute() },
       targetsDisabled: () => (${targetDisabled}),
@@ -64,9 +66,10 @@ function harness(t, savedSource = null, savedSkip = "0") {
           })
           if (command.includes("settings.sh")) {
             if (settingsFailure) return Promise.resolve({ errno: 1, stdout: "", stderr: "save failed" })
+            if (command.includes('settings.sh" set ')) storedSchedule = command.trim().split(/\s+/).pop()
             if (command.includes("source ")) storedSource = command.trim().split(/\s+/).pop()
             if (command.includes("skip-revocation ")) storedSkip = command.trim().split(/\s+/).pop()
-            return Promise.resolve({ errno: 0, stdout: "SCHEDULE=off\nLAST_RUN=0\nSOURCE=" + storedSource + (storedSkip === null ? "" : "\nSKIP_REVOCATION=" + storedSkip), stderr: "" })
+            return Promise.resolve({ errno: 0, stdout: "SCHEDULE=" + storedSchedule + "\nLAST_RUN=0\nSOURCE=" + storedSource + (storedSkip === null ? "" : "\nSKIP_REVOCATION=" + storedSkip), stderr: "" })
           }
           return Promise.resolve({ errno: 0, stdout: "", stderr: "" })
         },
@@ -91,6 +94,25 @@ function harness(t, savedSource = null, savedSkip = "0") {
   return { ...module.exports.handlers, calls, toasts, timers, failSettings: value => { settingsFailure = value } }
 }
 const result = (errno, extra = {}) => ({ errno, stdout: "", stderr: "", ...extra })
+
+test("schedule moves immediately, blocks duplicate changes, and returns to the saved value on failure", async (t) => {
+  const h = harness(t)
+  await h.loadMeta()
+  const saving = h.setSchedule("weekly")
+  assert.equal(h.scheduleState().pending, "weekly")
+  await h.setSchedule("daily")
+  assert.equal(h.scheduleState().pending, "weekly")
+  await saving
+  assert.equal(h.scheduleState().saved, "weekly")
+  assert.equal(h.scheduleState().pending, null)
+  h.failSettings(true)
+  const failed = h.setSchedule("daily")
+  assert.equal(h.scheduleState().pending, "daily")
+  await failed
+  assert.equal(h.scheduleState().saved, "weekly")
+  assert.equal(h.scheduleState().pending, null)
+  assert.match(h.state().error, /save failed/)
+})
 
 test("WebUI source selection persists and every update uses the saved source", async (t) => {
   const h = harness(t)

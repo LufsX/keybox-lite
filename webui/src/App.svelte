@@ -200,6 +200,8 @@
 
   const schedules: Schedule[] = ["off", "daily", "weekly"]
   let schedule = $state<Schedule | null>(null)
+  let scheduleChoice = $state<Schedule | null>(null)
+  const displayedSchedule = $derived(scheduleChoice ?? schedule)
   let lastRun = $state(0)
   let version = $state("")
   let records = $state<string[]>([])
@@ -504,13 +506,18 @@
   }
 
   async function setSchedule(v: Schedule) {
-    if (!moddir) return
-    await run("settings", async () => {
-      const r = await exec('sh "' + moddir + '/settings.sh" set ' + v)
-      requireSuccess(r, m.settingsFailed)
-      await loadMeta()
-      if (schedule !== v) throw new Error(m.settingsFailed)
-    })
+    if (!moddir || busy !== null || schedule === v) return
+    scheduleChoice = v
+    try {
+      await run("settings", async () => {
+        const r = await exec('sh "' + moddir + '/settings.sh" set ' + v)
+        requireSuccess(r, m.settingsFailed)
+        await loadMeta()
+        if (schedule !== v) throw new Error(m.settingsFailed)
+      })
+    } finally {
+      scheduleChoice = null
+    }
   }
 
   async function showLog() {
@@ -701,9 +708,12 @@
 
     <section class="{ui.panel}">
       <div class="{ui.heading}"><h2 class={ui.headingTitle}><CalendarClock size={17} />{m.schedule}</h2></div>
-      <div class="grid grid-cols-3 rounded-[10px] bg-[var(--inset)] p-0.5 {ui.buttonGroup}">
+      <div class="schedule-control" role="group" aria-label={m.schedule} aria-busy={scheduleChoice !== null}>
+        <span class="schedule-indicator" class:is-ready={displayedSchedule !== null}
+          style:transform={"translateX(calc(" + Math.max(0, schedules.indexOf(displayedSchedule!)) * 100 + "% + " + Math.max(0, schedules.indexOf(displayedSchedule!)) * 8 + "px))"} aria-hidden="true"></span>
         {#each schedules as opt}
-          <button onclick={() => setSchedule(opt)} disabled={busy !== null || !moddir} aria-pressed={schedule === opt} class={"min-h-8 min-w-0 rounded-lg px-0.5 py-0.5 text-xs leading-normal transition-colors disabled:opacity-60 " + (schedule === opt ? "bg-[var(--panel)] font-semibold text-[var(--accent)] shadow-sm" : "text-[var(--muted)]")}>{m[opt]}</button>
+          <button onclick={() => setSchedule(opt)} disabled={busy !== null || !moddir} aria-pressed={displayedSchedule === opt}
+            class:is-active={displayedSchedule === opt}>{m[opt]}</button>
         {/each}
       </div>
       <div class="min-h-[18px] mt-2">
