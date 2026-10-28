@@ -46,16 +46,44 @@
 
 <style>
   .app-row {
+    position: relative;
+    isolation: isolate;
     border-radius: 12px;
     background: var(--panel);
-    box-shadow: inset 0 0 0 1px transparent;
-    transition: background-color 180ms ease-out, box-shadow 180ms ease-out;
   }
-  .app-row.is-selected {
+  .app-row::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
     background: var(--accent-bg);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 180ms cubic-bezier(.2, 0, 0, 1);
+  }
+  .app-row.is-selected::before {
+    opacity: 1;
+    transition-duration: 240ms;
   }
   .app-row-label { transition: color 180ms ease-out; }
+  .app-row .ui-check {
+    transform: scale(1);
+    transition: background-color 180ms ease-out, border-color 180ms ease-out, box-shadow 180ms ease-out, transform 180ms cubic-bezier(.2, 0, 0, 1);
+  }
+  .app-row .ui-check:checked { transform: scale(1.06); }
+  .app-row .ui-check::after {
+    clip-path: inset(0 100% 0 0);
+    transform: translateY(-1px) rotate(-45deg) scale(.75);
+    transition: clip-path 130ms ease-out, opacity 100ms ease-out, transform 150ms ease-out;
+  }
+  .app-row .ui-check:checked::after {
+    clip-path: inset(0);
+    transform: translateY(-1px) rotate(-45deg) scale(1);
+    transition-duration: 180ms, 120ms, 200ms;
+  }
+  .check-hit:active .ui-check:not(:disabled) { transform: scale(.9); }
   .app-row.is-selected .app-row-label { color: var(--accent); }
   .target-tune {
     display: grid;
@@ -66,9 +94,9 @@
     color: var(--accent);
     opacity: 0;
     visibility: hidden;
-    transform: scale(.9);
+    transform: translateX(3px) scale(.94);
     pointer-events: none;
-    transition: opacity 150ms ease-out, transform 150ms ease-out, background-color 150ms, visibility 0s 150ms;
+    transition: opacity 140ms ease-out, transform 180ms cubic-bezier(.2, 0, 0, 1), background-color 150ms, visibility 0s 180ms;
   }
   .target-tune.is-visible {
     opacity: 1;
@@ -84,6 +112,7 @@
     .target-tune:hover:not(:disabled) { background: var(--panel); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .app-row, .app-row-label, .target-tune { transition: none; }
+    .app-row::before, .app-row-label, .target-tune, .app-row .ui-check, .app-row .ui-check::after { transition: none; }
+    .app-row .ui-check:checked { transform: none; }
   }
 </style>

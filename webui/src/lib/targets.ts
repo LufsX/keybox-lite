@@ -127,7 +127,7 @@ export function targetEntryCommand(bin: string, enabled: boolean): string {
   return shellQuote(bin) + " targets entry set " + (enabled ? "on" : "off")
 }
 export type TargetSort = "name" | "package" | "installed"
-export function visiblePackages(status: TargetStatus, draft: TargetDraft, query: string, filter = "listed", labels: ReadonlyMap<string, AppLabel> = new Map(), pinned?: ReadonlySet<string>, sort: TargetSort = "name", showSystem = false): TargetPackage[] {
+export function visiblePackages(status: TargetStatus, draft: TargetDraft, query: string, filter = "listed", labels: ReadonlyMap<string, AppLabel> = new Map(), pinned?: ReadonlySet<string>, sort?: TargetSort, showSystem?: boolean): TargetPackage[] {
   const selected = new Map(draft.targets.map(item => [item.package_name, item.mode]))
   const known = new Set(status.packages.map(item => item.package_name))
   const system = new Set(draft.system_apps)
@@ -139,8 +139,26 @@ export function visiblePackages(status: TargetStatus, draft: TargetDraft, query:
     }
   }
   const search = query.trim().toLowerCase()
-  return packages.filter(item => (item.package_name.toLowerCase().includes(search) || (labels.get(item.package_name)?.label ?? "").toLowerCase().includes(search)) &&
+  return packages.filter(item => (showSystem !== false || !item.system) && (item.package_name.toLowerCase().includes(search) || (labels.get(item.package_name)?.label ?? "").toLowerCase().includes(search)) &&
     (filter === "listed" ? showSystem || !item.system || system.has(item.package_name) || item.selected :
       filter === "all" || (filter === "selected" ? item.selected : filter === "system" ? item.system : !item.system)))
-    .sort((a, b) => Number(pinned?.has(b.package_name) ?? b.selected) - Number(pinned?.has(a.package_name) ?? a.selected) || (sort === "installed" ? (labels.get(b.package_name)?.installedAt ?? -Infinity) - (labels.get(a.package_name)?.installedAt ?? -Infinity) : 0) || (sort === "package" ? a.package_name.localeCompare(b.package_name) : compareAppNames(labels.get(a.package_name)?.label || a.package_name, labels.get(b.package_name)?.label || b.package_name) || a.package_name.localeCompare(b.package_name)))
+    .sort((a, b) => {
+      // Omitted sorting preserves the selection grouping used by system dialogs.
+      if (sort === undefined) {
+        const priority = Number(pinned?.has(b.package_name) ?? b.selected) - Number(pinned?.has(a.package_name) ?? a.selected)
+        if (priority) return priority
+      }
+      if (sort === "installed") {
+        const first = labels.get(a.package_name)?.installedAt
+        const second = labels.get(b.package_name)?.installedAt
+        const aTime = typeof first === "number" && Number.isFinite(first) && first > 0 ? first : null
+        const bTime = typeof second === "number" && Number.isFinite(second) && second > 0 ? second : null
+        if (aTime === null && bTime !== null) return 1
+        if (aTime !== null && bTime === null) return -1
+        if (aTime !== null && bTime !== null && aTime !== bTime) return bTime - aTime
+      }
+      return sort === "package" ? a.package_name.localeCompare(b.package_name) :
+        compareAppNames(labels.get(a.package_name)?.label || a.package_name, labels.get(b.package_name)?.label || b.package_name) ||
+        a.package_name.localeCompare(b.package_name)
+    })
 }

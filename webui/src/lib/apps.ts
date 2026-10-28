@@ -57,9 +57,8 @@ export async function packagesInfo(names: string[], signal?: AbortSignal, onBatc
         if (typeof entry.packageName !== "string" || !batch.includes(entry.packageName)) continue
         if (typeof entry.appLabel === "string" && entry.appLabel.trim()) resolved.add(entry.packageName)
         const label = typeof entry.appLabel === "string" && entry.appLabel.trim() ? entry.appLabel.trim() : entry.packageName
-        const installedAt = typeof entry.firstInstallTime === "number" ? entry.firstInstallTime : typeof entry.installTime === "number" ? entry.installTime : null
         for (const original of requested.get(entry.packageName) ?? [])
-          result.set(original, { label, icon: "ksu://icon/" + entry.packageName, installedAt })
+          result.set(original, { label, icon: "ksu://icon/" + entry.packageName, installedAt: null })
       }
       // Cache resolved native labels only; missing packages remain retryable.
       for (const name of batch) {

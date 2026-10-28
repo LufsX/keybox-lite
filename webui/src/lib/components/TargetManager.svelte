@@ -3,6 +3,7 @@
   import { slide } from "svelte/transition"
   import { Link2, Unlink, Loader2, Search, KeyRound, ChevronRight, ChevronDown, NotebookPen, Undo2, PackagePlus, RefreshCw, ListPlus, SlidersHorizontal, SquareDashed, CheckCheck, Settings2 } from "lucide-svelte"
   import { packagesInfo } from "../apps"
+  import { readInstallTimes } from "../installTimes"
   import AppRow from "./AppRow.svelte"
   import AppListSkeleton from "./AppListSkeleton.svelte"
   import Modal from "./Modal.svelte"
@@ -12,6 +13,7 @@
   import { messages, type Locale } from "../i18n"
   import { ui } from "../ui"
   import { surface, reveal, pageExit } from "../motion"
+  import { stickySearch } from "../stickySearch"
   import {
     modes, policyKeys, validPackage, validDraft, validPolicy, validPolicyValue, parseTargetStatus, parseTargetAck,
     draftFromStatus, targetBackendTitle, targetStatusCommand, targetSaveCommand, targetEntryCommand, visiblePackages,
@@ -39,9 +41,69 @@
   let query = $state("")
   let filter = $state("listed")
   const preferenceKey = "keybox-lite.target-list-preferences"
-  const storedPreferences = (() => { try { return JSON.parse(localStorage.getItem(preferenceKey) ?? "{}") } catch { return {} } })()
-  let targetSort = $state<TargetSort>(["name", "package", "installed"].includes(storedPreferences.sort) ? storedPreferences.sort : "name")
+  const storedPreferences = (() => { try { const value = JSON.parse(localStorage.getItem(preferenceKey) ?? "{}"); return value && typeof value === "object" ? value : {} } catch { return {} } })()
+  const preferredSort: TargetSort = ["name", "package", "installed"].includes(storedPreferences.sort) ? storedPreferences.sort : "name"
+  let requestedSort = $state<TargetSort>(preferredSort)
+  let targetSort = $state<TargetSort>(preferredSort === "installed" ? "name" : preferredSort)
+  let sortReady = $state(preferredSort !== "installed")
   let showSystemApps = $state(storedPreferences.showSystem === true)
+  let sortMenuOpen = $state(false)
+  let installTimes = $state<Map<string, number>>(new Map())
+  let installTimesLoading = $state(false)
+  let installTimesError = $state("")
+  let installTimesSequence = 0
+  let installTimesController: AbortController | undefined
+  let checkedInstallNames = ""
+  function saveListPreferences() { try { localStorage.setItem(preferenceKey, JSON.stringify({ sort: sortReady ? targetSort : requestedSort, showSystem: showSystemApps })) } catch {} }
+  function cancelInstallSort() {
+    installTimesSequence++
+    installTimesController?.abort()
+    installTimesController = undefined
+    installTimesLoading = false
+  }
+  async function setSort(value: TargetSort) {
+    if (disposed || disabled || !bin) return
+    if (value === "installed" && installTimesLoading && requestedSort === value) return
+    cancelInstallSort()
+    requestedSort = value
+    installTimesError = ""
+    if (value !== "installed") {
+      targetSort = value
+      sortReady = true
+      saveListPreferences()
+      return
+    }
+    if (!status) { sortReady = false; return }
+    const id = installTimesSequence, path = bin, names = metadataNames
+    const controller = new AbortController()
+    installTimesController = controller
+    installTimesLoading = true
+    const live = () => !disposed && !disabled && bin === path && id === installTimesSequence && !controller.signal.aborted
+    try {
+      const hasPackages = status.packages.some(item => !item.package_name.startsWith("uid:")) ||
+        !!draft?.targets.some(item => !item.package_name.startsWith("uid:"))
+      const times = hasPackages ? await readInstallTimes(controller.signal) : new Map<string, number>()
+      if (!live()) return
+      if (hasPackages && !times.size) throw new Error("Missing install times")
+      // Publish the data and selected sort together; the previous list remains
+      // visible while the request is pending.
+      installTimes = times
+      checkedInstallNames = names
+      targetSort = "installed"
+      sortReady = true
+      saveListPreferences()
+    } catch {
+      if (live()) {
+        checkedInstallNames = names
+        requestedSort = targetSort
+        sortReady = true
+        installTimesError = m.targetsInstallTimeFailed
+      }
+    } finally {
+      if (id === installTimesSequence) { installTimesLoading = false; installTimesController = undefined }
+    }
+  }
+  function toggleSystemVisibility() { showSystemApps = !showSystemApps; saveListPreferences() }
   let manual = $state("")
   let manualMode = $state<TargetMode>("auto")
   let manualModeOpen = $state(false)
@@ -59,7 +121,7 @@
   let globalBaseline = ""
   let systemDraft = $state<string[]>([])
   let systemBaseline = ""
-  let metadata = $state<Map<string, { label: string; icon: string | null; installedAt: number | null }>>(new Map())
+  let metadata = $state<Map<string, { label: string; icon: string | null }>>(new Map())
   let metadataSequence = 0
   let metadataNames = $derived(status ? [...new Set([...status.packages.map(item => item.package_name), ...(draft?.targets.map(item => item.package_name) ?? [])])].sort().join("\n") : "")
   let systemSelection = $state<ReadonlySet<string>>(new Set())
@@ -75,11 +137,18 @@
   let locked = $derived(disabled || pending || !bin)
   let editable = $derived(!locked && ready && !!status?.supported && !!status?.backend?.active)
   let dirty = $derived(!!draft && JSON.stringify(draft) !== baseline)
-  let visible = $derived(status && draft ? visiblePackages(status, draft, query, showSystemApps ? "all" : filter, metadata, initialSelection ?? undefined, targetSort, showSystemApps) : [])
+  let sortMetadata = $derived(new Map(metadataNames.split("\n").filter(Boolean).map(name => [name, { label: metadata.get(name)?.label || name, installedAt: installTimes.get(name.includes("@") ? name.split("@")[0] + "@" + Number(name.split("@")[1]) : name) }])))
+  let visible = $derived(status && draft ? visiblePackages(status, draft, query, filter, sortMetadata, initialSelection ?? undefined, targetSort, showSystemApps) : [])
   const inputClass = "min-h-8 min-w-0 rounded-lg border border-[var(--line)] bg-[var(--inset)] px-2 py-1 text-xs text-[var(--text)] disabled:opacity-50"
 
   $effect(() => {
     if (bin !== contextBin) {
+      cancelInstallSort()
+      if (sortReady) requestedSort = targetSort
+      installTimes = new Map()
+      checkedInstallNames = ""
+      sortReady = requestedSort !== "installed"
+      targetSort = requestedSort === "installed" ? "name" : requestedSort
       closeEditor()
       closeSheet()
       menuOpen = false
@@ -103,6 +172,10 @@
       notice = ""
     }
     if (disabled) { closeEditor(); closeSheet(); menuOpen = false }
+    if (disabled && installTimesLoading) {
+      cancelInstallSort()
+      if (sortReady) requestedSort = targetSort
+    }
     if (disabled && entryBusy) { entrySequence++; entryBusy = false; entryReady = false }
     if (disabled && pending) {
       saving = false
@@ -121,13 +194,13 @@
     const names = metadataNames, path = bin, blocked = disabled
     return untrack(() => names && path && !blocked ? loadMetadata(names.split("\n"), path) : undefined)
   })
-  onDestroy(() => { disposed = true; sequence++; entrySequence++; metadataSequence++ })
+  onDestroy(() => { disposed = true; cancelInstallSort(); sequence++; entrySequence++; metadataSequence++ })
 
   function loadMetadata(names: string[], path: string) {
     const id = ++metadataSequence
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 6000)
-    const apply = (value: Map<string, { label: string; icon: string | null; installedAt: number | null }>) => {
+    const apply = (value: Map<string, { label: string; icon: string | null }>) => {
       if (!disposed && !controller.signal.aborted && id === metadataSequence && bin === path && !disabled) metadata = value
     }
     void packagesInfo(names, controller.signal, apply).then(apply).catch(() => {
@@ -137,6 +210,16 @@
     })
     return () => { controller.abort(); clearTimeout(timer); if (id === metadataSequence) metadataSequence++ }
   }
+
+  $effect(() => {
+    const path = bin, blocked = disabled, initial = !sortReady, loaded = ready
+    const names = metadataNames, sort = targetSort, loading = installTimesLoading
+    untrack(() => {
+      if (path && !blocked && loaded && !loading && (initial || (sort === "installed" && names !== checkedInstallNames))) {
+        void setSort(initial ? requestedSort : sort)
+      }
+    })
+  })
   $effect(() => { onMenuChange?.(menuOpen) })
   function trackTitle(node: HTMLHeadingElement) {
     let observer: IntersectionObserver | undefined
@@ -165,9 +248,10 @@
       onTitleVisibility?.(false)
     } }
   }
-  export function toggleMenu() { menuOpen = !menuOpen }
+  export function toggleMenu() { sortMenuOpen = false; menuOpen = !menuOpen }
   function closeMenu(focus = false) {
     menuOpen = false
+    sortMenuOpen = false
     if (focus) document.getElementById("targets-menu-trigger")?.focus()
   }
   function dismissMenu(event: Event) {
@@ -176,7 +260,7 @@
     if (menuOpen && !menuElement?.contains(target)) closeMenu()
   }
   function menuKeydown(event: KeyboardEvent) {
-    if (!menuOpen) return
+    if (!menuOpen || event.defaultPrevented) return
     if (event.key === "Escape") { event.preventDefault(); closeMenu(true); return }
     const buttons = Array.from(menuElement?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || !buttons.length) return
@@ -391,7 +475,7 @@
   }
   function selectVisible(enabled: boolean) {
     if (!status || !draft) return
-    const scope = visiblePackages(status, draft, query, showSystemApps ? "all" : filter, metadata, initialSelection ?? undefined, targetSort, showSystemApps)
+    const scope = visiblePackages(status, draft, query, filter, sortMetadata, initialSelection ?? undefined, targetSort, showSystemApps)
     const selected = new Map(draft.targets.map(item => [item.package_name, item]))
     const tracked = new Set(draft.system_apps)
     for (const item of scope) {
@@ -558,13 +642,13 @@
         { value: "select", label: m.targetsSelectVisible, icon: CheckCheck, blocked: !editable },
         { value: "clear", label: m.targetsClearVisible, icon: SquareDashed, blocked: !editable },
         { value: "refresh", label: m.refresh, icon: RefreshCw, blocked: locked },
+        { value: "manual", label: m.targetsManual, icon: ListPlus, blocked: !editable },
         { value: "system", label: m.targetsSystemApps, icon: ListPlus, blocked: !editable },
         { value: "auto", label: m.targetsAutoAdd, icon: PackagePlus, blocked: !editable },
         { value: "global", label: m.targetsGlobalPolicy, icon: SlidersHorizontal, blocked: !editable || !supportsGlobalPolicy() },
-                { value: "manual", label: m.targetsManual, icon: ListPlus, blocked: !editable },
         { value: "entry", label: m.targetsEntry, icon: Settings2, blocked: disabled || !bin }
       ] as option}
-        {#if ["system", "global", "entry"].includes(option.value)}<div class="target-menu-divider" role="separator"></div>{/if}
+        {#if ["manual", "global"].includes(option.value)}<div class="target-menu-divider" role="separator"></div>{/if}
         <button type="button" class="target-menu-item"
           role={option.value === "auto" ? "menuitemcheckbox" : "menuitem"} aria-checked={option.value === "auto" ? !!draft?.auto_add_new_apps : undefined}
           disabled={option.blocked} onclick={() => menuAction(option.value)}>
@@ -572,6 +656,19 @@
           <span class="min-w-0 flex-1">{option.label}</span>
           {#if option.value === "auto"}<span class="menu-check" class:is-checked={!!draft?.auto_add_new_apps} aria-hidden="true"></span>{/if}
         </button>
+        {#if option.value === "refresh"}
+          <div class="target-menu-divider" role="separator"></div>
+          <div class="grid gap-0.5" role="group" aria-label={m.targetsSort}>
+            <Dropdown id={componentId + "-list-sort"} label={m.targetsSort}
+              options={[{ value: "name", label: m.targetsSortName }, { value: "package", label: m.targetsSortPackage }, { value: "installed", label: m.targetsSortInstalled }]}
+              selected={targetSort} open={sortMenuOpen} disabled={disabled || !ready || !sortReady} triggerClass="target-menu-item w-full"
+              onOpenChange={(open) => sortMenuOpen = open} onSelect={setSort}>
+              {#snippet trigger()}<SlidersHorizontal size={16} class="shrink-0" /><span class="min-w-0 flex-1">{m.targetsSort}</span><span class="shrink-0 text-[11px] text-[var(--muted)]">{!sortReady ? m.loading : targetSort === "name" ? "A–Z" : targetSort === "package" ? m.targetsSortPackage : m.targetsSortInstalled}</span><ChevronRight size={14} />{/snippet}
+            </Dropdown>
+            <button type="button" class="target-menu-item w-full" role="menuitemcheckbox" aria-checked={showSystemApps}
+              onclick={toggleSystemVisibility}><ListPlus size={16} class="shrink-0" /><span class="min-w-0 flex-1">{m.targetsShowSystem}</span><span class="menu-check" class:is-checked={showSystemApps} aria-hidden="true"></span></button>
+          </div>
+        {/if}
       {/each}
     </div>
   {/if}
@@ -609,7 +706,7 @@
       </div>
     {/if}
     {#if !status && !error}
-      <div class="target-search" aria-hidden="true" data-skeleton="search">
+      <div class="target-search" use:stickySearch aria-hidden="true" data-skeleton="search">
         <div class="flex min-h-11 items-center gap-2 rounded-full bg-[var(--panel)] px-3">
           <span class="skeleton-block size-[17px] shrink-0 !rounded-full"></span>
           <span class="skeleton-block h-3 w-32"></span>
@@ -619,26 +716,20 @@
       <AppListSkeleton />
     {/if}
     {#if error}<p role="alert" class="whitespace-pre-wrap text-[var(--red)] [overflow-wrap:anywhere]">{error}</p>{/if}
+    {#if installTimesLoading}<p role="status" class="target-notice">{m.loading}</p>{/if}
+    {#if installTimesError}<p role="alert" class="target-notice">{installTimesError}</p>{/if}
     {#if notice && !sheet && !editor}<p role="status" class="target-notice" transition:surface>{notice}</p>{/if}
     {#if status && !status.supported}<p>{m.targetsUnsupported}</p>{/if}
     {#if status?.supported && draft}
-      <div class="target-search">
+      <div class="target-search" use:stickySearch>
       <div class="flex min-h-11 items-center gap-2 rounded-full bg-[var(--panel)] px-3">
         <Search size={17} class="shrink-0 text-[var(--muted)]" />
         <input class="min-w-0 flex-1 bg-transparent py-2.5 outline-none" type="search" aria-label={m.targetsSearch} placeholder={m.targetsSearch} bind:value={query}
           onkeydown={(event) => { if (event.key === "Escape") query = "" }} />
         <span class="shrink-0 text-[11px] tabular-nums text-[var(--muted)]" aria-live="polite">{m.targetsSelected} {draft.targets.length}</span>
       </div>
-      <div class="mt-1.5 flex items-center gap-1.5">
-        <label class="flex min-h-8 flex-1 items-center gap-1.5 text-[11px] text-[var(--muted)]"><span>{m.targetsSort}</span>
-          <select class="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[var(--panel)] px-1.5 py-1 text-[11px] text-[var(--text)]" aria-label={m.targetsSort} value={targetSort} onchange={(event) => { targetSort = event.currentTarget.value as TargetSort; try { localStorage.setItem(preferenceKey, JSON.stringify({ sort: targetSort, showSystem: showSystemApps })) } catch {} }}>
-            <option value="name">{m.targetsSortName}</option><option value="package">{m.targetsSortPackage}</option><option value="installed">{m.targetsSortInstalled}</option>
-          </select>
-        </label>
-        <label class="flex min-h-8 items-center gap-1 text-[11px] text-[var(--muted)]"><input type="checkbox" class="ui-check" checked={showSystemApps} onchange={(event) => { showSystemApps = event.currentTarget.checked; try { localStorage.setItem(preferenceKey, JSON.stringify({ sort: targetSort, showSystem: showSystemApps })) } catch {} }} />{m.targetsShowSystem}</label>
       </div>
-      </div>
-      {#if ready}
+      {#if ready && sortReady}
         <VirtualList items={visible} getKey={(item) => item.package_name} estimateSize={68}>
           {#snippet item(app)}
             <div class="pb-1">
@@ -654,7 +745,7 @@
       {:else}
         <AppListSkeleton />
       {/if}
-      {#if ready && !visible.length}<p class="page-enter py-4 text-center text-[var(--muted)]">{m.targetsEmpty}</p>{/if}
+      {#if ready && sortReady && !visible.length}<p class="page-enter py-4 text-center text-[var(--muted)]">{m.targetsEmpty}</p>{/if}
       <div class="target-fab-bar">
         <div class="pointer-events-auto flex items-end justify-end">
           {#if dirty}

@@ -10,5 +10,5 @@ export const ui = {
   buttonGroup: "gap-2",
   menu: "absolute right-0 top-[calc(100%+4px)] z-20 grid w-[120px] max-w-[calc(100vw-24px)] gap-0.5 rounded-[10px] border border-[var(--line)] bg-[var(--panel)] p-0.5 shadow-[0_10px_32px_#00000026]",
   menuItem: "flex min-h-8 min-w-0 items-center gap-1.5 rounded-lg px-1.5 py-1 text-start text-xs leading-normal text-[var(--muted)] [overflow-wrap:anywhere] transition-colors duration-150 hover:bg-[var(--inset)] [&_span]:min-w-0 [&_span]:flex-1",
-  menuItemActive: "bg-[var(--inset)] font-semibold !text-[var(--accent)]",
+  menuItemActive: "font-semibold !text-[var(--accent)]",
 } as const

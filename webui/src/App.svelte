@@ -12,6 +12,7 @@
   import { LogBuffer, stripAnsi, parseHistoryRecord, type LogLine } from "./lib/log"
   import Dropdown from "./lib/components/Dropdown.svelte"
   import LogOutput from "./lib/components/LogOutput.svelte"
+  import BusyIndicator from "./lib/components/BusyIndicator.svelte"
   import { ui } from "./lib/ui"
   import CertificateDetails from "./lib/components/CertificateDetails.svelte"
   import TargetManager from "./lib/components/TargetManager.svelte"
@@ -175,6 +176,7 @@
   let savedOutput = $state("")
   let savedOutputLines = $state.raw<LogLine[]>([])
   let logLoading = $state(false)
+  let refreshVisible = $state(false)
   let logSequence = 0
   let error = $state("")
   let checkRc = $state<number | null>(null)
@@ -636,9 +638,7 @@
     <section class="{ui.panel} relative" aria-busy={!initialDone || busy === "refresh"}>
       <div class="{ui.heading}">
         <h2 class={ui.headingTitle}><HardDrive size={17} />{m.installed}</h2>
-        <span class="flex min-h-[18px] items-center gap-1.5 whitespace-nowrap text-[11px] text-[var(--muted)]" role="status">
-          {#if !initialDone || busy === "refresh"}<Loader2 size={13} class="motion-safe:animate-spin" />{m.loading}{/if}
-        </span>
+        <BusyIndicator active={!initialDone || busy === "refresh"} label={m.loading} bind:visible={refreshVisible} />
       </div>
       <div class="min-h-[184px]">
         {#if !initialDone}
@@ -742,9 +742,8 @@
         {#if busy === "check"}<Loader2 size={16} class="motion-safe:animate-spin" />{:else}<ShieldCheck size={16} />{/if}
         {busy === "check" ? m.checking : m.check}
       </button>
-      <button class="{ui.button} border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]" onclick={refresh} disabled={busy !== null}>
-        {#if busy === "refresh"}<Loader2 size={16} class="motion-safe:animate-spin" />{:else}<RefreshCw size={16} />{/if}
-        {busy === "refresh" ? m.refreshing : m.refresh}
+      <button class="{ui.button} border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]" class:!opacity-100={busy === "refresh"} onclick={refresh} disabled={busy !== null} aria-busy={busy === "refresh"}>
+        <RefreshCw size={16} class={refreshVisible ? "motion-safe:animate-spin" : ""} />{m.refresh}
       </button>
     </div>
 
@@ -787,7 +786,7 @@
 
     <LogOutput output={savedLogVisible ? savedOutput : output} lines={savedLogVisible ? savedOutputLines : outputLines}
       title={m.output} hint={m.hint} currentLabel={m.currentOutput} savedLabel={m.savedUpdateLog}
-      refreshLabel={m.refresh} loadingLabel={m.loading} saved={savedLogVisible} loading={logLoading}
+      loadingLabel={m.loading} saved={savedLogVisible} loading={logLoading}
       disabled={busy !== null || !moddir} onCurrent={showCurrentOutput} onSaved={showLog} />
     </div>
     {/if}

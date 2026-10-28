@@ -49,8 +49,9 @@ function fixture(overrides = {}) {
     revision: "revision-1", ...overrides,
   }
 }
-function harness(initial = fixture()) {
+function harness(initial = fixture(), preferences = null) {
   const calls = [], queue = [], effects = [], cleanups = [], confirmations = [], metadataQueue = [], metadataCalls = [], menuChanges = [], titles = []
+  const writes = [], installQueue = [], installReads = []
   const timers = new Map()
   let focused = 0
   class Element { closest() { return null } }
@@ -60,13 +61,14 @@ function harness(initial = fixture()) {
   const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1]
   runInNewContext(transpile(script + `
     export const handlers = {
-      refreshEntry, entryChecked, entryStateLabel, canManageEntry, canLeave, refresh, save, setEntry, select, selectVisible, setMode, setPolicy, trackSystem, autoAdd, addManual, beforeUnload,
+      setSort, toggleSystemVisibility, refreshEntry, entryChecked, entryStateLabel, canManageEntry, canLeave, refresh, save, setEntry, select, selectVisible, setMode, setPolicy, trackSystem, autoAdd, addManual, beforeUnload,
       openEditor, closeEditor, applyEditor, editPolicy, countChanges, sheetChanged,
       toggleMenu, closeMenu, dismissMenu, menuKeydown, menuAction, openSheet, closeSheet, toggleSystem, applySystem, discard, loadMetadata,
       bindMenu: node => { menuElement = node },
       editorMode: mode => { editor.mode = mode },
       editorTracked: value => { editor.tracked = value },
-      state: () => ({ status, draft, baseline, ready, entryReady, entry, entryBusy, entryError, entryNotice, saving, pending, error, notice, editor, menuOpen, sheet, systemDraft, metadata, dirty: changed() }),
+      state: () => ({ status, draft, baseline, ready, entryReady, entry, entryBusy, entryError, entryNotice, saving, pending, error, notice, editor, menuOpen, sheet, systemDraft, metadata, targetSort, requestedSort, sortReady, installTimes, installTimesLoading, installTimesError, showSystemApps, dirty: changed() }),
+      display: () => status && draft ? visiblePackages(status, draft, query, filter, new Map([...status.packages, ...draft.targets].map(item => [item.package_name, { label: metadata.get(item.package_name)?.label || item.package_name, installedAt: installTimes.get(item.package_name) }])), initialSelection ?? undefined, targetSort, showSystemApps) : [],
       search: (text, kind = "all") => { query = text; filter = kind },
       // Mirror the component: rows are ordered by the selection captured on first load.
       visible: () => status && draft ? visiblePackages(status, draft, query, filter, metadata, initialSelection ?? undefined) : [],
@@ -82,16 +84,19 @@ function harness(initial = fixture()) {
         calls.push(command)
         return queue.length ? Promise.resolve(queue.shift()) : Promise.resolve(response(command.endsWith(" targets entry status") ? current.entry : current))
       } }
+      if (name === "../installTimes") return { readInstallTimes(signal) { installReads.push(signal); return installQueue.length ? installQueue.shift() : Promise.resolve(new Map()) } }
       if (name === "../i18n") return locale
       if (name === "../targets") return targets
       if (name === "../ui") return ui
       if (name === "../apps") return { packagesInfo(names, signal, onBatch) { metadataCalls.push({ names, signal, onBatch }); return metadataQueue.length ? metadataQueue.shift() : Promise.resolve(new Map()) } }
+      if (name === "../stickySearch") return { stickySearch() {} }
       if (name === "../motion") return { surface: () => ({}), reveal: () => ({}), pageExit: () => ({}) }
       if (name === "./AppListSkeleton.svelte") return {}
       throw new Error(name)
     },
     $props: Object.assign(() => ({ bin: "/module/bin/keybox", lang: "en", onMenuChange: value => menuChanges.push(value), onTitleChange: value => titles.push(value) }), { id: () => "harness" }),
     AbortController, Element, document,
+    localStorage: { getItem: () => preferences, setItem: (key, value) => writes.push([key, value]) },
     setTimeout: fn => { const id = {}; timers.set(id, fn); return id },
     clearTimeout: id => timers.delete(id),
     $state: value => value,
@@ -101,7 +106,8 @@ function harness(initial = fixture()) {
   })
   const h = exports.handlers
   return {
-    ...h, calls, confirmations, metadataCalls, menuChanges, titles, Element, document,
+    ...h, writes, calls, confirmations, installReads,
+    installResult: value => installQueue.push(value), metadataCalls, menuChanges, titles, Element, document,
     metadataResult: value => metadataQueue.push(value),
     expireMetadata: () => { for (const fn of [...timers.values()]) fn(); timers.clear() },
     timerCount: () => timers.size,
@@ -237,6 +243,7 @@ test("save carries all modes, policies, inherited blanks, system tracking and re
 test("search and user/system filters bound bulk selection and clearing to visible apps", async () => {
   const h = harness()
   await h.refresh(false)
+  h.toggleSystemVisibility()
   h.search("COM.", "system")
   assert.deepEqual(plain(h.visible()).map(item => item.package_name), ["com.system"])
   h.selectVisible(true)
@@ -762,6 +769,8 @@ test("system tracking dialog applies only on confirmation and keeps selected sys
   h.applySystem()
   assert.deepEqual(plain(h.state().draft.system_apps), [])
   assert.ok(h.listed().some(item => item.package_name === "com.system"))
+  assert.equal(h.display().some(item => item.system), false)
+  h.toggleSystemVisibility()
   h.menuAction("clear")
   assert.equal(h.state().draft.targets.length, 0)
   // Clear only untargets the visible rows; the tracked system app stays listed.
@@ -965,7 +974,7 @@ test("save and entry writes exclude each other without conflating their busy sta
 
 test("package rows are available before metadata completion and batches obey cancellation guards", async () => {
   assert.doesNotMatch(component, /catalogReady/)
-  assert.match(component, /\{#if ready\}\s*<VirtualList/)
+  assert.match(component, /\{#if ready && sortReady\}\s*<VirtualList/)
   for (const end of ["timeout", "path", "disabled", "destroy", "cleanup"]) {
     const h = harness()
     await h.refresh(false)
@@ -1050,4 +1059,105 @@ test("full refresh synchronizes entry only when no independent entry request int
   await operation
   assert.equal(h.entryStateLabel(), locale.messages.en.targetsEntryOn)
   assert.doesNotMatch(component, /\{#if entryNotice\}/)
+})
+
+
+test("list preferences hide selected and tracked system apps, persist and never edit the target draft", async () => {
+  const initial = fixture()
+  initial.config.targets.push({ package_name: "com.system", mode: "auto" })
+  initial.system_apps.push("com.system")
+  const h = harness(initial)
+  await h.refresh(false)
+  const before = plain(h.state().draft)
+  assert.equal(h.display().some(app => app.system), false)
+  h.toggleSystemVisibility()
+  assert.equal(h.display().some(app => app.system), true)
+  h.toggleSystemVisibility()
+  assert.equal(h.display().some(app => app.system), false)
+  h.setSort("package")
+  assert.deepEqual(plain(h.state().draft), before)
+  assert.equal(h.state().dirty, false)
+  const restored = harness(initial, h.writes.at(-1)[1])
+  await restored.refresh(false)
+  assert.equal(restored.state().targetSort, "package")
+  assert.equal(restored.state().showSystemApps, false)
+  assert.equal(restored.display().some(app => app.system), false)
+  for (const invalid of ["null", "[]", "bad json", '{"sort":"bad","showSystem":"true"}']) {
+    const safe = harness(initial, invalid)
+    assert.equal(safe.state().targetSort, "name")
+    assert.equal(safe.state().showSystemApps, false)
+  }
+})
+
+
+test("recent installation sort commits data and choice together, blocks duplicate reads and persists only on success", async () => {
+  const h = harness()
+  await h.refresh(false)
+  h.setSort("package")
+  const previous = plain(h.display()).map(app => app.package_name)
+  const writes = h.writes.length
+  let finish
+  h.installResult(new Promise(resolve => { finish = resolve }))
+  const request = h.setSort("installed")
+  assert.equal(h.state().targetSort, "package")
+  assert.equal(h.state().installTimesLoading, true)
+  assert.equal(h.state().sortReady, true)
+  assert.equal(h.writes.length, writes)
+  assert.deepEqual(plain(h.display()).map(app => app.package_name), previous)
+  await h.setSort("installed")
+  assert.equal(h.installReads.length, 1)
+  finish(new Map([["com.beta", 20], ["com.alpha", 10]]))
+  await request
+  assert.equal(h.state().targetSort, "installed")
+  assert.equal(h.state().installTimesLoading, false)
+  assert.deepEqual(plain(h.display()).map(app => app.package_name), ["com.beta", "com.alpha"])
+  assert.equal(JSON.parse(h.writes.at(-1)[1]).sort, "installed")
+})
+
+test("failed recent sort preserves the previous choice, order and preference", async () => {
+  const h = harness()
+  await h.refresh(false)
+  await h.setSort("package")
+  const count = h.writes.length
+  h.installResult(Promise.reject(new Error("read failed")))
+  await h.setSort("installed")
+  assert.equal(h.state().targetSort, "package")
+  assert.equal(h.state().requestedSort, "package")
+  assert.equal(h.state().sortReady, true)
+  assert.equal(h.state().installTimesError, locale.messages.en.targetsInstallTimeFailed)
+  assert.equal(h.writes.length, count)
+})
+
+test("changing sort or leaving cancels an older installation read and ignores its late result", async () => {
+  for (const abandon of ["change", "dispose", "context", "disable"]) {
+    const h = harness()
+    await h.refresh(false)
+    let finish
+    h.installResult(new Promise(resolve => { finish = resolve }))
+    const request = h.setSort("installed")
+    if (abandon === "change") await h.setSort("package")
+    else if (abandon === "dispose") h.dispose()
+    else { h.context(abandon === "context" ? "/new/bin" : "/module/bin/keybox", abandon === "disable"); h.effect() }
+    assert.equal(h.installReads[0].aborted, true)
+    finish(new Map([["com.alpha", 10]]))
+    await request
+    assert.notEqual(h.state().targetSort, "installed")
+    assert.equal(h.state().installTimesLoading, false)
+  }
+})
+
+test("restored recent-install preference waits for its data before exposing the list", async () => {
+  const h = harness(fixture(), '{"sort":"installed","showSystem":false}')
+  assert.equal(h.state().sortReady, false)
+  await h.refresh(false)
+  let finish
+  h.installResult(new Promise(resolve => { finish = resolve }))
+  h.effect()
+  assert.equal(h.state().sortReady, false)
+  assert.equal(h.state().installTimesLoading, true)
+  finish(new Map([["com.beta", 20], ["com.alpha", 10]]))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(h.state().sortReady, true)
+  assert.equal(h.state().targetSort, "installed")
+  assert.deepEqual(plain(h.display()).map(app => app.package_name), ["com.beta", "com.alpha"])
 })

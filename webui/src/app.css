@@ -68,6 +68,21 @@ svg { flex-shrink: 0; }
 }
 .target-toolbar::before { top: calc(-1 * env(safe-area-inset-top)); }
 .target-search::before { top: 0; }
+main.targets-search-docked::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(env(safe-area-inset-top) + var(--toolbar-top) + var(--toolbar-height) + var(--toolbar-gap) + var(--targets-search-height, var(--search-height)));
+  z-index: 19;
+  background: var(--bg);
+  pointer-events: none;
+}
+main.targets-search-docked .target-toolbar,
+main.targets-search-docked .target-search { background: transparent; }
+main.targets-search-docked .target-toolbar::before,
+main.targets-search-docked .target-search::before { content: none; }
 .target-toolbar-title {
   opacity: 0;
   transform: translateY(3px);
@@ -178,7 +193,6 @@ svg { flex-shrink: 0; }
   transition: background-color 150ms, color 150ms;
 }
 .target-menu-item > svg { color: var(--muted); }
-.target-menu-item[aria-checked="true"] { background: var(--accent-bg); color: var(--accent); }
 .target-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--inset); }
 .target-menu-item:active:not(:disabled) { background: var(--accent-bg); }
 .target-menu-item:disabled { opacity: .4; }
@@ -240,12 +254,13 @@ svg { flex-shrink: 0; }
 .schedule-control button:disabled { opacity: .6; }
 @supports ((backdrop-filter: blur(16px)) or (-webkit-backdrop-filter: blur(16px))) {
   .target-toolbar, .target-search { background: transparent; }
-  .target-toolbar::before, .target-search::before {
+  .target-toolbar::before, .target-search::before, main.targets-search-docked::before {
     background: color-mix(in srgb, var(--bg) 78%, transparent);
     -webkit-backdrop-filter: blur(18px);
     backdrop-filter: blur(18px);
   }
-  .target-search > div, .target-menu {
+  .target-search > div { background: color-mix(in srgb, var(--panel) 85%, transparent); }
+  .target-menu {
     background: color-mix(in srgb, var(--panel) 85%, transparent);
     -webkit-backdrop-filter: blur(16px);
     backdrop-filter: blur(16px);
