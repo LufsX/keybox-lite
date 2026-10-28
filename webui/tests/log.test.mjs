@@ -73,3 +73,12 @@ test("default buffer caps visible and copied text at 80k including multiline ANS
   assert.equal(flatten(buffer.lines), buffer.text)
   assert.equal(buffer.text.includes("\x1b"), false)
 })
+
+test("history separates installed records and preserves unfamiliar formats as raw text", () => {
+  const parse = module.exports.parseHistoryRecord
+  const value = parse("2026-10-28 12:00:00 | meow | 4096 bytes | installed")
+  assert.equal(value.time, "2026-10-28 12:00:00")
+  assert.equal(value.source, "meow")
+  assert.equal(value.bytes, 4096)
+  for (const line of ["legacy entry", "2026-10-28 12:00:00 | meow | 4 bytes | failed", "2026-10-28 12:00:00 | meow | 999999999999999999 bytes | installed", "2026-10-28 12:00:00 |   | 4 bytes | installed"]) assert.equal(parse(line), null)
+})

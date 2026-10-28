@@ -35,6 +35,14 @@ export function parseLogLine(text: string): LogLine {
   return { text, parts }
 }
 
+export function parseHistoryRecord(text: string): { time: string; source: string; bytes: number } | null {
+  const match = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| ([^|]+) \| (\d+) bytes \| installed$/.exec(text)
+  if (!match) return null
+  const bytes = Number(match[3])
+  if (!Number.isSafeInteger(bytes) || bytes < 0 || !match[2].trim()) return null
+  return { time: match[1], source: match[2].trim(), bytes }
+}
+
 // Keep parsed rows intact across batches; only an unfinished tail and trimmed head change.
 export class LogBuffer {
   text = ""

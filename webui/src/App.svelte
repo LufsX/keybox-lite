@@ -9,12 +9,13 @@
   } from "lucide-svelte"
   import { exec, execUpdate, toast, enableEdgeToEdge, type ExecResult } from "./lib/bridge"
   import { messages, detect, isLocale, supportedLanguages, type Locale } from "./lib/i18n"
-  import { LogBuffer, stripAnsi, type LogLine } from "./lib/log"
+  import { LogBuffer, stripAnsi, parseHistoryRecord, type LogLine } from "./lib/log"
   import Dropdown from "./lib/components/Dropdown.svelte"
   import LogOutput from "./lib/components/LogOutput.svelte"
   import { ui } from "./lib/ui"
   import CertificateDetails from "./lib/components/CertificateDetails.svelte"
   import TargetManager from "./lib/components/TargetManager.svelte"
+  import { targetBackendTitle } from "./lib/targets"
   import Toast from "./lib/components/Toast.svelte"
   import { parseCertificateStatus, certificateStatusForSerial, type CertificateVerification, type CertificateValidity, type ValidityStatus } from "./lib/certificateStatus"
 
@@ -23,7 +24,7 @@
   let targetManager: { canLeave(): boolean; toggleMenu(): void } | undefined = $state()
   let targetMenuOpen = $state(false)
   let targetTitleVisible = $state(false)
-  let targetTitle = $state("Tricky Store")
+  let targetTitle = $state("")
   function syncRoute() {
     const next = window.location.hash === "#/targets"
     if (targetsPage && !next && targetManager && !targetManager.canLeave()) {
@@ -115,7 +116,7 @@
   // waiting budget, not a total backend deadline. Neither timeout cancels the job.
   const VERIFY_TIMEOUT = 30 * 60_000
   const UPDATE_TIMEOUT = 75 * 60_000
-  type Busy = "update" | "check" | "refresh" | "settings" | "log"
+  type Busy = "update" | "check" | "refresh" | "settings"
   type Schedule = "off" | "daily" | "weekly"
   type KeyboxSource = "auto" | "meow" | "spectre"
   const keyboxSources: KeyboxSource[] = ["auto", "meow", "spectre"]
@@ -159,7 +160,7 @@
     serials: string[]
     validity?: { status: ValidityStatus; certificates: CertificateValidity[] }
     integrity?: import("./lib/certificateStatus").KeyboxIntegrity
-    backend?: { identity: string; active: boolean } | null
+    backend?: { identity: string; active: boolean; name?: string; version?: string } | null
     backend_error?: string
   }
 
@@ -171,6 +172,10 @@
   let info = $state<KeyboxInfo | null>(null)
   let output = $state("")
   let savedLogVisible = $state(false)
+  let savedOutput = $state("")
+  let savedOutputLines = $state.raw<LogLine[]>([])
+  let logLoading = $state(false)
+  let logSequence = 0
   let error = $state("")
   let checkRc = $state<number | null>(null)
   let certificateVerification = $state<CertificateVerification | null>(null)
@@ -323,7 +328,8 @@
     }
     if (v.backend != null) {
       const backend = v.backend as Record<string, unknown>
-      if (typeof backend !== "object" || typeof backend.identity !== "string" || typeof backend.active !== "boolean") throw new Error(m.invalidInfo)
+      if (typeof backend !== "object" || typeof backend.identity !== "string" || typeof backend.active !== "boolean" ||
+        !["name", "version"].every(key => backend[key] === undefined || typeof backend[key] === "string")) throw new Error(m.invalidInfo)
     }
     if (v.backend_error !== undefined && typeof v.backend_error !== "string") throw new Error(m.invalidInfo)
     return v as unknown as KeyboxInfo
@@ -411,7 +417,7 @@
   async function update() {
     if (!moddir) return
     await run("update", async () => {
-      savedLogVisible = false
+      showCurrentOutput()
       setOutput("")
       clearCertificateCheck()
       cancelRequested = false
@@ -478,7 +484,7 @@
   async function checkRevocation() {
     if (!bin) return
     await run("check", async () => {
-      savedLogVisible = false
+      showCurrentOutput()
       setOutput("")
       clearCertificateCheck()
       try {
@@ -539,14 +545,31 @@
     }
   }
 
+  function showCurrentOutput() {
+    savedLogVisible = false
+    logSequence++
+    logLoading = false
+  }
+
   async function showLog() {
-    if (!moddir) return
-    await run("log", async () => {
+    if (!moddir || busy !== null || logLoading) return
+    const sequence = ++logSequence
+    logLoading = true
+    error = ""
+    try {
       const r = await exec('if [ -f /data/local/tmp/keybox-update.log ]; then tail -n 80 /data/local/tmp/keybox-update.log; fi')
+      if (disposed || sequence !== logSequence) return
       requireSuccess(r, m.logFailed)
-      setOutput(r.stdout.trim() || m.noLog)
+      const buffer = new LogBuffer(OUTPUT_LIMIT)
+      buffer.replace(r.stdout.trim() || m.noLog)
+      savedOutput = buffer.text
+      savedOutputLines = buffer.lines.slice()
       savedLogVisible = true
-    })
+    } catch (cause) {
+      if (!disposed && sequence === logSequence) error = cause instanceof Error ? cause.message : String(cause)
+    } finally {
+      if (!disposed && sequence === logSequence) logLoading = false
+    }
   }
 
   onMount(() => {
@@ -575,14 +598,14 @@
   })
 </script>
 
-<svelte:head><title>{targetsPage ? targetTitle : "Keybox Lite"}</title></svelte:head>
+<svelte:head><title>{targetsPage ? targetTitle || m.targetsTitle : "Keybox Lite"}</title></svelte:head>
 
 <div class="app-shell">
   <main class="mx-auto w-full max-w-[var(--page-width)] px-[var(--page-gutter)] pt-[var(--page-top)] pb-5">
     <header class={targetsPage ? "target-toolbar flex min-h-10 items-center gap-1.5" : "mb-3 flex items-center gap-2"}>
       {#if targetsPage}
         <a href="#/" class={ui.iconButton} aria-label={m.targetsBack} title={m.targetsBack} onclick={returnHome}><ArrowLeft size={18} /></a>
-        <div class="target-toolbar-title min-w-0 flex-1 truncate text-sm font-semibold" class:is-visible={targetTitleVisible} aria-hidden={!targetTitleVisible}>{targetTitle}</div>
+        <div class="target-toolbar-title min-w-0 flex-1 truncate text-sm font-semibold" class:is-visible={targetTitleVisible} aria-hidden={!targetTitleVisible}>{targetTitle || m.targetsTitle}</div>
         <button id="targets-menu-trigger" type="button" class={ui.iconButton + " target-more"} aria-label={m.targetsMore} aria-haspopup="menu" aria-controls="targets-menu" aria-expanded={targetMenuOpen}
           onclick={() => targetManager?.toggleMenu()}><EllipsisVertical size={19} /></button>
       {:else}
@@ -669,7 +692,7 @@
       </div>
     </section>
 
-    <a href="#/targets" class="{ui.panel} {ui.panelRow} text-[var(--text)] transition-colors hover:bg-[var(--inset)]"><span class={ui.headingTitle}><ListChecks size={17} />{m.targetsTitle}</span><ChevronRight size={17} /></a>
+    <a href="#/targets" class="{ui.panel} {ui.panelRow} text-[var(--text)] transition-colors hover:bg-[var(--inset)]"><span class={ui.headingTitle}><ListChecks size={17} />{targetBackendTitle(info?.backend, m.targetsTitle)}</span><ChevronRight size={17} /></a>
 
     <CertificateDetails certificates={info?.validity?.certificates} serials={info?.serials}
       verification={certificateVerification} integrity={info?.integrity} messages={m} bind:open={detailsOpen} />
@@ -745,12 +768,27 @@
       {#if !initialDone}
         <div class="grid gap-1.5" aria-hidden="true"><div class="block h-[18px] w-[92%] animate-pulse rounded-md bg-[var(--inset)] motion-reduce:animate-none"></div><div class="block h-[18px] w-[92%] animate-pulse rounded-md bg-[var(--inset)] motion-reduce:animate-none"></div></div>
       {:else if records.length}
-        <div class="max-h-[180px] overflow-y-auto [&_p]:border-b [&_p]:border-[var(--line)] [&_p]:py-1.5 [&_p]:font-mono [&_p]:text-[11px] [&_p]:leading-normal [&_p]:text-[var(--muted)] [&_p]:[overflow-wrap:anywhere] [&_p:last-child]:border-0" in:fade={{ duration: reducedMotion ? 0 : 220 }}>{#each records as r}<p>{r}</p>{/each}</div>
+        <ol class="max-h-[180px] overflow-y-auto text-[11px]" in:fade={{ duration: reducedMotion ? 0 : 160 }}>
+          {#each records as record}
+            {@const item = parseHistoryRecord(record)}
+            <li class="border-b border-[var(--line)] py-1.5 first:pt-0 last:border-0 last:pb-0">
+              {#if item}
+                <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5">
+                  <time class="tabular-nums text-[var(--muted)]" datetime={item.time.replace(" ", "T")}>{item.time}</time>
+                  <span class="text-[var(--success)]">{m.updateSuccess}</span>
+                </div>
+                <p class="mt-0.5 flex flex-wrap gap-x-2 text-[var(--muted)]"><span class="font-medium text-[var(--text)] [overflow-wrap:anywhere]">{item.source}</span><span>{fmtSize(item.bytes)}</span></p>
+              {:else}<p class="font-mono leading-relaxed text-[var(--muted)] [overflow-wrap:anywhere]">{record}</p>{/if}
+            </li>
+          {/each}
+        </ol>
       {:else}<p class="text-[11px] leading-relaxed text-[var(--muted)]">{m.noRecords}</p>{/if}
     </section>
 
-    <LogOutput {output} lines={outputLines} title={savedLogVisible ? m.savedUpdateLog : m.output} hint={m.hint}
-      viewSavedLogLabel={m.savedUpdateLog} disabled={busy !== null || !moddir} onViewSavedLog={showLog} />
+    <LogOutput output={savedLogVisible ? savedOutput : output} lines={savedLogVisible ? savedOutputLines : outputLines}
+      title={m.output} hint={m.hint} currentLabel={m.currentOutput} savedLabel={m.savedUpdateLog}
+      refreshLabel={m.refresh} loadingLabel={m.loading} saved={savedLogVisible} loading={logLoading}
+      disabled={busy !== null || !moddir} onCurrent={showCurrentOutput} onSaved={showLog} />
     </div>
     {/if}
   </main>

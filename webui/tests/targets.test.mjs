@@ -50,7 +50,7 @@ function fixture(overrides = {}) {
   }
 }
 function harness(initial = fixture()) {
-  const calls = [], queue = [], effects = [], cleanups = [], confirmations = [], metadataQueue = [], metadataCalls = [], menuChanges = []
+  const calls = [], queue = [], effects = [], cleanups = [], confirmations = [], metadataQueue = [], metadataCalls = [], menuChanges = [], titles = []
   const timers = new Map()
   let focused = 0
   class Element { closest() { return null } }
@@ -61,7 +61,7 @@ function harness(initial = fixture()) {
   runInNewContext(transpile(script + `
     export const handlers = {
       refreshEntry, entryChecked, entryStateLabel, canManageEntry, canLeave, refresh, save, setEntry, select, selectVisible, setMode, setPolicy, trackSystem, autoAdd, addManual, beforeUnload,
-      openEditor, closeEditor, applyEditor, editPolicy, countChanges,
+      openEditor, closeEditor, applyEditor, editPolicy, countChanges, sheetChanged,
       toggleMenu, closeMenu, dismissMenu, menuKeydown, menuAction, openSheet, closeSheet, toggleSystem, applySystem, discard, loadMetadata,
       bindMenu: node => { menuElement = node },
       editorMode: mode => { editor.mode = mode },
@@ -90,7 +90,7 @@ function harness(initial = fixture()) {
       if (name === "./AppListSkeleton.svelte") return {}
       throw new Error(name)
     },
-    $props: Object.assign(() => ({ bin: "/module/bin/keybox", lang: "en", onMenuChange: value => menuChanges.push(value) }), { id: () => "harness" }),
+    $props: Object.assign(() => ({ bin: "/module/bin/keybox", lang: "en", onMenuChange: value => menuChanges.push(value), onTitleChange: value => titles.push(value) }), { id: () => "harness" }),
     AbortController, Element, document,
     setTimeout: fn => { const id = {}; timers.set(id, fn); return id },
     clearTimeout: id => timers.delete(id),
@@ -101,7 +101,7 @@ function harness(initial = fixture()) {
   })
   const h = exports.handlers
   return {
-    ...h, calls, confirmations, metadataCalls, menuChanges, Element, document,
+    ...h, calls, confirmations, metadataCalls, menuChanges, titles, Element, document,
     metadataResult: value => metadataQueue.push(value),
     expireMetadata: () => { for (const fn of [...timers.values()]) fn(); timers.clear() },
     timerCount: () => timers.size,
@@ -113,6 +113,28 @@ function harness(initial = fixture()) {
     dispose: () => cleanups.forEach(fn => fn()),
   }
 }
+
+test("detected backend metadata determines page titles, with safe identity and absent-backend fallbacks", async () => {
+  for (const [identity, expected] of [["TS", "Tricky Store"], ["TS-L", "Tricky Store"], ["TEES-RS", "TEESimulator-RS"], ["TEES", "TEESimulator"], ["OMK", "OhMyKeymint"]]) {
+    const initial = fixture({ backend: { backend: "detected-kind", identity, active: true, version: "9.1" } })
+    assert.equal(targets.targetBackendTitle(initial.backend, "Targets"), expected)
+    const h = harness(initial)
+    await h.refresh(false)
+    assert.equal(h.titles.at(-1), expected)
+    h.status({ ...initial, backend: { ...initial.backend, name: " Installed fork " }, revision: "next" })
+    await h.refresh(false)
+    assert.equal(h.titles.at(-1), "Installed fork")
+    h.status({ ...initial, backend: null, supported: false, revision: "absent" })
+    await h.refresh(false)
+    assert.equal(h.titles.at(-1), locale.messages.en.targetsTitle)
+  }
+  assert.equal(targets.targetBackendTitle({ identity: "constructor" }, "Targets"), "Targets")
+  assert.equal(targets.targetBackendTitle({ identity: "__proto__", name: " " }, "Targets"), "Targets")
+  assert.equal(targets.targetBackendTitle(null, "目标管理"), "目标管理")
+  const app = readFileSync(new URL("../src/App.svelte", import.meta.url), "utf8")
+  assert.match(app, /href="#\/targets"[^\n]*targetBackendTitle\(info\?\.backend, m.targetsTitle\)/)
+  assert.match(component, /<h1[^\n]*targetBackendTitle\(status\?\.backend, m.targetsTitle\)/)
+})
 
 test("target tokens, dates and strict JSON validation preserve unknown safe policies", () => {
   for (const name of ["com.example", "android", "com.example@10", "uid:10001", "uid:0", "uid:001", "com.example@00", "_app", "com._app"])

@@ -1,6 +1,6 @@
 import { getPackagesInfo } from "kernelsu"
 
-export interface AppInfo { label: string; icon: string | null }
+export interface AppInfo { label: string; icon: string | null; installedAt: number | null }
 
 const metadataCache = new Map<string, { value: AppInfo; expires: number }>()
 const CACHE_TTL = 30_000
@@ -48,7 +48,7 @@ export async function packagesInfo(names: string[], signal?: AbortSignal, onBatc
       // Icons may still be available when the host lacks a label for a package.
       for (const name of batch) {
         for (const original of requested.get(name) ?? [])
-          result.set(original, { label: original, icon: "ksu://icon/" + name })
+          result.set(original, { label: original, icon: "ksu://icon/" + name, installedAt: null })
       }
       const resolved = new Set<string>()
       for (const info of infos) {
@@ -57,8 +57,9 @@ export async function packagesInfo(names: string[], signal?: AbortSignal, onBatc
         if (typeof entry.packageName !== "string" || !batch.includes(entry.packageName)) continue
         if (typeof entry.appLabel === "string" && entry.appLabel.trim()) resolved.add(entry.packageName)
         const label = typeof entry.appLabel === "string" && entry.appLabel.trim() ? entry.appLabel.trim() : entry.packageName
+        const installedAt = typeof entry.firstInstallTime === "number" ? entry.firstInstallTime : typeof entry.installTime === "number" ? entry.installTime : null
         for (const original of requested.get(entry.packageName) ?? [])
-          result.set(original, { label, icon: "ksu://icon/" + entry.packageName })
+          result.set(original, { label, icon: "ksu://icon/" + entry.packageName, installedAt })
       }
       // Cache resolved native labels only; missing packages remain retryable.
       for (const name of batch) {

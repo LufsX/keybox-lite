@@ -14,9 +14,9 @@
   import { surface, reveal, pageExit } from "../motion"
   import {
     modes, policyKeys, validPackage, validDraft, validPolicy, validPolicyValue, parseTargetStatus, parseTargetAck,
-    draftFromStatus, targetStatusCommand, targetSaveCommand, targetEntryCommand, visiblePackages,
+    draftFromStatus, targetBackendTitle, targetStatusCommand, targetSaveCommand, targetEntryCommand, visiblePackages,
     parseTargetEntry, targetEntryStatusCommand, type TargetEntry,
-    type TargetStatus, type TargetDraft, type TargetMode, type PolicyKey, type Policy,
+    type TargetStatus, type TargetDraft, type TargetMode, type PolicyKey, type Policy, type TargetSort,
   } from "../targets"
 
   let { bin, lang, disabled = false, onMenuChange, onTitleVisibility, onTitleChange }: { bin: string; lang: Locale; disabled?: boolean; onMenuChange?: (open: boolean) => void; onTitleVisibility?: (visible: boolean) => void; onTitleChange?: (title: string) => void } = $props()
@@ -38,6 +38,10 @@
   let notice = $state("")
   let query = $state("")
   let filter = $state("listed")
+  const preferenceKey = "keybox-lite.target-list-preferences"
+  const storedPreferences = (() => { try { return JSON.parse(localStorage.getItem(preferenceKey) ?? "{}") } catch { return {} } })()
+  let targetSort = $state<TargetSort>(["name", "package", "installed"].includes(storedPreferences.sort) ? storedPreferences.sort : "name")
+  let showSystemApps = $state(storedPreferences.showSystem === true)
   let manual = $state("")
   let manualMode = $state<TargetMode>("auto")
   let manualModeOpen = $state(false)
@@ -55,7 +59,7 @@
   let globalBaseline = ""
   let systemDraft = $state<string[]>([])
   let systemBaseline = ""
-  let metadata = $state<Map<string, { label: string; icon: string | null }>>(new Map())
+  let metadata = $state<Map<string, { label: string; icon: string | null; installedAt: number | null }>>(new Map())
   let metadataSequence = 0
   let metadataNames = $derived(status ? [...new Set([...status.packages.map(item => item.package_name), ...(draft?.targets.map(item => item.package_name) ?? [])])].sort().join("\n") : "")
   let systemSelection = $state<ReadonlySet<string>>(new Set())
@@ -71,7 +75,7 @@
   let locked = $derived(disabled || pending || !bin)
   let editable = $derived(!locked && ready && !!status?.supported && !!status?.backend?.active)
   let dirty = $derived(!!draft && JSON.stringify(draft) !== baseline)
-  let visible = $derived(status && draft ? visiblePackages(status, draft, query, filter, metadata, initialSelection ?? undefined) : [])
+  let visible = $derived(status && draft ? visiblePackages(status, draft, query, showSystemApps ? "all" : filter, metadata, initialSelection ?? undefined, targetSort, showSystemApps) : [])
   const inputClass = "min-h-8 min-w-0 rounded-lg border border-[var(--line)] bg-[var(--inset)] px-2 py-1 text-xs text-[var(--text)] disabled:opacity-50"
 
   $effect(() => {
@@ -123,7 +127,7 @@
     const id = ++metadataSequence
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 6000)
-    const apply = (value: Map<string, { label: string; icon: string | null }>) => {
+    const apply = (value: Map<string, { label: string; icon: string | null; installedAt: number | null }>) => {
       if (!disposed && !controller.signal.aborted && id === metadataSequence && bin === path && !disabled) metadata = value
     }
     void packagesInfo(names, controller.signal, apply).then(apply).catch(() => {
@@ -232,6 +236,7 @@
   }
   function discard() {
     if (!canEdit() || !status || !window.confirm(m.targetsDiscard)) return
+    initialSelection = null
     accept(status)
     notice = ""
   }
@@ -328,7 +333,7 @@
   }
   function accept(value: TargetStatus, entryVersion?: number) {
     status = value
-    onTitleChange?.(value.backend?.name || "Tricky Store")
+    onTitleChange?.(targetBackendTitle(value.backend, m.targetsTitle))
     if (entryVersion === entrySequence && !entryBusy) {
       entry = value.entry
       entryReady = true
@@ -348,6 +353,7 @@
   async function refresh(ask = true, quiet = false) {
     if (disabled || pending || !bin || disposed) return
     if (ask && (changed() || editorChanged() || sheetChanged()) && !window.confirm(m.targetsDiscard)) return
+    const resetOrder = changed()
     closeEditor()
     if (sheet !== "entry") closeSheet()
     const id = ++sequence, path = bin, entryVersion = entrySequence
@@ -358,6 +364,7 @@
     try {
       const value = await readStatus(path)
       if (!live(id, path)) return
+      if (resetOrder) initialSelection = null
       accept(value, entryVersion)
       if (ready && !quiet) notice = m.targetsRefreshed
     } catch (cause) {
@@ -384,7 +391,7 @@
   }
   function selectVisible(enabled: boolean) {
     if (!status || !draft) return
-    const scope = visiblePackages(status, draft, query, filter, metadata, initialSelection ?? undefined)
+    const scope = visiblePackages(status, draft, query, showSystemApps ? "all" : filter, metadata, initialSelection ?? undefined, targetSort, showSystemApps)
     const selected = new Map(draft.targets.map(item => [item.package_name, item]))
     const tracked = new Set(draft.system_apps)
     for (const item of scope) {
@@ -543,7 +550,7 @@
 <svelte:window onbeforeunload={beforeUnload} onpointerdown={dismissMenu} onfocusin={dismissMenu} onkeydown={menuKeydown} {onscroll} />
 
 <div class="page-enter target-page relative min-w-0 text-xs" aria-busy={pending} out:pageExit|global>
-  <h1 use:trackTitle class="mb-3 text-xl font-[650] leading-[1.35] tracking-[-.6px] max-[359px]:text-lg">{status?.backend?.name || "Tricky Store"}</h1>
+  <h1 use:trackTitle class="mb-3 text-xl font-[650] leading-[1.35] tracking-[-.6px] max-[359px]:text-lg">{targetBackendTitle(status?.backend, m.targetsTitle)}</h1>
   {#if menuOpen}
     <div bind:this={menuElement} id="targets-menu" role="menu" aria-label={m.targetsMore}
       class="target-menu fixed z-50 grid w-64 overflow-y-auto" transition:surface>
@@ -554,7 +561,7 @@
         { value: "system", label: m.targetsSystemApps, icon: ListPlus, blocked: !editable },
         { value: "auto", label: m.targetsAutoAdd, icon: PackagePlus, blocked: !editable },
         { value: "global", label: m.targetsGlobalPolicy, icon: SlidersHorizontal, blocked: !editable || !supportsGlobalPolicy() },
-        { value: "manual", label: m.targetsManual, icon: ListPlus, blocked: !editable },
+                { value: "manual", label: m.targetsManual, icon: ListPlus, blocked: !editable },
         { value: "entry", label: m.targetsEntry, icon: Settings2, blocked: disabled || !bin }
       ] as option}
         {#if ["system", "global", "entry"].includes(option.value)}<div class="target-menu-divider" role="separator"></div>{/if}
@@ -573,7 +580,7 @@
       <div class="{ui.panel} !mb-0 grid gap-2">
         <div class="min-w-0">
           <div class="flex items-center gap-2">
-            <span class="min-w-0 font-semibold [overflow-wrap:anywhere]">{status.backend.name || status.backend.module_id || status.backend.identity}</span>
+            <span class="min-w-0 font-semibold [overflow-wrap:anywhere]">{targetBackendTitle(status.backend, m.targetsTitle)}</span>
             <span class="shrink-0 rounded-md bg-[var(--inset)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--muted)]">{status.backend.identity}</span>
           </div>
           {#if status.backend.version || status.backend.module_id}
@@ -621,6 +628,14 @@
         <input class="min-w-0 flex-1 bg-transparent py-2.5 outline-none" type="search" aria-label={m.targetsSearch} placeholder={m.targetsSearch} bind:value={query}
           onkeydown={(event) => { if (event.key === "Escape") query = "" }} />
         <span class="shrink-0 text-[11px] tabular-nums text-[var(--muted)]" aria-live="polite">{m.targetsSelected} {draft.targets.length}</span>
+      </div>
+      <div class="mt-1.5 flex items-center gap-1.5">
+        <label class="flex min-h-8 flex-1 items-center gap-1.5 text-[11px] text-[var(--muted)]"><span>{m.targetsSort}</span>
+          <select class="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[var(--panel)] px-1.5 py-1 text-[11px] text-[var(--text)]" aria-label={m.targetsSort} value={targetSort} onchange={(event) => { targetSort = event.currentTarget.value as TargetSort; try { localStorage.setItem(preferenceKey, JSON.stringify({ sort: targetSort, showSystem: showSystemApps })) } catch {} }}>
+            <option value="name">{m.targetsSortName}</option><option value="package">{m.targetsSortPackage}</option><option value="installed">{m.targetsSortInstalled}</option>
+          </select>
+        </label>
+        <label class="flex min-h-8 items-center gap-1 text-[11px] text-[var(--muted)]"><input type="checkbox" class="ui-check" checked={showSystemApps} onchange={(event) => { showSystemApps = event.currentTarget.checked; try { localStorage.setItem(preferenceKey, JSON.stringify({ sort: targetSort, showSystem: showSystemApps })) } catch {} }} />{m.targetsShowSystem}</label>
       </div>
       </div>
       {#if ready}
@@ -687,14 +702,10 @@
         <input class={inputClass} aria-label={m.targetsManual} placeholder={m.targetsManual} bind:value={manual}
           onkeydown={(event) => { if (event.key === "Enter") { event.preventDefault(); addManual() } }} />
         {#if supportsModes()}
-          <div class="manual-mode-picker">
             <Dropdown id={componentId + "-manual-mode"} label={m.targetsMode}
               options={modes.map(value => ({ value, label: modeLabel(value) }))} selected={manualMode}
               open={manualModeOpen} disabled={!editable} triggerClass={ui.selectButton + " w-full"}
-              onOpenChange={(open) => manualModeOpen = open} onSelect={(value) => manualMode = value}>
-              {#snippet trigger()}<span>{modeLabel(manualMode)}</span><ChevronDown size={14} />{/snippet}
-            </Dropdown>
-          </div>
+              onOpenChange={(open) => manualModeOpen = open} onSelect={(value) => manualMode = value} />
         {/if}
         {#if error}<p role="alert" class="text-[var(--red)]">{error}</p>{/if}
       </fieldset>
@@ -702,7 +713,7 @@
       <p class="text-[11px] leading-relaxed text-[var(--muted)]">{m.targetsEntryHint}</p>
       <div class="entry-controls mt-2">
         <div class="min-w-0">
-          <p class="text-xs font-medium [overflow-wrap:anywhere]">{entry?.module_id || status?.backend?.name || status?.backend?.identity || m.targetsEntry}</p>
+          <p class="text-xs font-medium [overflow-wrap:anywhere]">{targetBackendTitle(status?.backend, m.targetsEntry)}</p>
           <div id={componentId + "-entry-status"} role="status" aria-live="polite" class="entry-status">
             {#key entryStateLabel()}<span in:surface={{ y: 0, scale: 1, duration: 160 }}>{entryStateLabel()}</span>{/key}
           </div>
@@ -805,7 +816,6 @@
   </div>
 {/snippet}
 <style>
-  .manual-mode-picker :global([role="group"]) { position: relative; inset: auto; width: 100%; max-width: none; margin-top: 4px; box-shadow: none; }
   .entry-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .entry-status { margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
   .entry-action { position: relative; flex-shrink: 0; min-height: 32px; padding: 4px 10px 4px 24px; border: 1px solid var(--line); border-radius: 6px; background: var(--accent-bg); color: var(--accent); font-size: 12px; transition: background-color 160ms, color 160ms, opacity 160ms, transform 160ms; }

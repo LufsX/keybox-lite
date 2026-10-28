@@ -18,6 +18,7 @@ function loadModule(path, globals = {}) {
 const locale = loadModule("../src/lib/i18n.ts", { navigator: { language: "en" } })
 const logs = loadModule("../src/lib/log.ts")
 const certificateStatus = loadModule("../src/lib/certificateStatus.ts")
+const targets = loadModule("../src/lib/targets.ts", { require: () => ({}) })
 const dropdown = readFileSync(new URL("../src/lib/components/Dropdown.svelte", import.meta.url), "utf8")
 
 function harness({ saved, storageFails = false } = {}) {
@@ -32,9 +33,10 @@ function harness({ saved, storageFails = false } = {}) {
   const hooks = `
     export const handlers = {
       toggleTheme, toggleLanguage, setTheme, setLanguage,
-      showLog, checkRevocation, update, loadInfo, shellQuote,
+      targetLinkTitle: () => targetBackendTitle(info?.backend, messages[lang].targetsTitle),
+      showLog, showCurrentOutput, checkRevocation, update, loadInfo, shellQuote,
       seed: () => { setOutput("current output"); checkRc = 1 },
-      state: () => ({ lang, theme, themeOpen, languageOpen, savedLogVisible, output, checkRc, certificateVerification, info, infoStale, error, busy })
+      state: () => ({ lang, theme, themeOpen, languageOpen, savedLogVisible, output, savedOutput, savedOutputLines, logLoading, checkRc, certificateVerification, info, infoStale, error, busy })
     }
   `
   runInNewContext(compile(source + hooks), {
@@ -44,6 +46,7 @@ function harness({ saved, storageFails = false } = {}) {
       if (name === "./lib/i18n") return locale
       if (name === "./lib/log") return logs
       if (name === "./lib/certificateStatus") return certificateStatus
+      if (name === "./lib/targets") return targets
       if (name === "./lib/bridge") return {
         exec(command) {
           calls.push(command)
@@ -71,6 +74,30 @@ function harness({ saved, storageFails = false } = {}) {
   return { ...handlers, writes, calls, result: value => { nextResult = value }, info: value => { nextInfo = value }, queueInfo: (...values) => infoReads.push(...values) }
 }
 
+test("home target entry uses validated detected metadata and keeps its route across backend changes", async () => {
+  const h = harness()
+  const base = { path: "/keybox.xml", exists: true, size: 10, modified: 1, structure_valid: true, serials: ["1"] }
+  assert.equal(h.targetLinkTitle(), locale.messages.en.targetsTitle)
+  for (const [identity, expected] of [["TS-L", "Tricky Store"], ["TEES-RS", "TEESimulator-RS"], ["TEES", "TEESimulator"], ["OMK", "OhMyKeymint"]]) {
+    h.info({ ...base, backend: { identity, active: true, version: "1.0" } })
+    await h.loadInfo()
+    assert.equal(h.targetLinkTitle(), expected)
+  }
+  h.info({ ...base, backend: { identity: "TEES-RS", active: true, name: "Installed fork", version: "2.0" } })
+  await h.loadInfo()
+  assert.equal(h.targetLinkTitle(), "Installed fork")
+  for (const backend of [{ identity: "TS", active: true, name: 42 }, { identity: "TS", active: true, version: {} }]) {
+    h.info({ ...base, backend })
+    await assert.rejects(h.loadInfo(), /Invalid keybox information/)
+    assert.equal(h.state().infoStale, true)
+    assert.equal(h.targetLinkTitle(), "Installed fork")
+  }
+  h.info({ ...base, backend: null })
+  await h.loadInfo()
+  h.setLanguage("zh")
+  assert.equal(h.targetLinkTitle(), locale.messages.zh.targetsTitle)
+})
+
 function dropdownHarness({ disabled = false } = {}) {
   const module = { exports: {} }
   const changes = []
@@ -84,7 +111,7 @@ function dropdownHarness({ disabled = false } = {}) {
     export const handlers = {
       dismiss, keydown, select, navigate,
       setOpen: value => { open = value },
-      bind: (element, trigger) => { control = element; button = trigger }
+      bind: (element, trigger) => { control = element; menu = element; button = trigger }
     }
   `), {
     exports: module.exports,
@@ -94,6 +121,8 @@ function dropdownHarness({ disabled = false } = {}) {
       return {}
     },
     Node,
+    requestAnimationFrame: callback => callback(),
+    $state: value => value,
     document: { activeElement: null },
     $props: () => ({
       open: true, disabled, options: [{ value: "en" }, { value: "ja" }, { value: "zh" }], selected: "ja",
@@ -129,12 +158,12 @@ test("shared Dropdown preserves inside clicks, closes outside and restores focus
   h.dismiss({ target: h.outside })
   assert.deepEqual(h.changes, [false])
   h.setOpen(true)
-  h.keydown({ key: "Escape" })
+  h.keydown({ key: "Escape", preventDefault() {}, stopImmediatePropagation() {} })
   assert.deepEqual(h.changes, [false, false])
   assert.equal(h.focused(), 1)
-  h.keydown({ key: "Escape" })
+  h.keydown({ key: "Escape", preventDefault() {}, stopImmediatePropagation() {} })
   assert.equal(h.focused(), 1)
-  assert.match(dropdown, /onpointerdown=\{dismiss\} onfocusin=\{dismiss\} onkeydown=\{keydown\}/)
+  assert.match(dropdown, /onpointerdown=\{dismiss\} onfocusin=\{dismiss\} onkeydowncapture=\{keydown\}/)
 })
 
 test("shared Dropdown chooses the option, closes and restores focus", () => {
@@ -200,11 +229,14 @@ test("saved log entry reads last 80 persisted update lines, preserves the check 
   await h.showLog()
   assert.equal(h.calls.length, 1)
   assert.ok(h.calls[0].includes("tail -n 80 /data/local/tmp/keybox-update.log"))
-  assert.equal(h.state().output, "[DONE] saved update")
+  assert.equal(h.state().output, "current output")
+  assert.equal(h.state().savedOutput, "[DONE] saved update")
   assert.equal(h.state().savedLogVisible, true)
   assert.equal(h.state().checkRc, 1)
-  assert.match(app, /title=\{savedLogVisible \? m.savedUpdateLog : m.output\}/)
-  assert.match(app, /viewSavedLogLabel=\{m.savedUpdateLog\} disabled=\{busy !== null \|\| !moddir\} onViewSavedLog=\{showLog\}/)
+  h.showCurrentOutput()
+  assert.equal(h.state().savedLogVisible, false)
+  assert.equal(h.state().output, "current output")
+  assert.equal(h.state().savedOutput, "[DONE] saved update")
   await h.checkRevocation()
   assert.equal(h.state().savedLogVisible, false)
   await h.showLog()
@@ -301,7 +333,8 @@ test("missing saved log is explicit; a failed read preserves current output and 
   const empty = harness()
   empty.result({ errno: 0, stdout: "", stderr: "" })
   await empty.showLog()
-  assert.equal(empty.state().output, locale.messages.en.noLog)
+  assert.equal(empty.state().savedOutput, locale.messages.en.noLog)
+  assert.equal(empty.state().output, "")
   assert.equal(empty.state().savedLogVisible, true)
   const failed = harness()
   failed.seed()
@@ -482,4 +515,50 @@ test("time-invalid output with rc3 retains its original hint only for a verified
       assert.equal(certificateStatus.certificateStatusForSerial(rejected.state().certificateVerification, "1").status, "unknown")
     }
   }
+})
+
+test("returning to current output cancels a pending saved-log view without losing either buffer", async () => {
+  const h = harness()
+  h.seed()
+  await h.showLog()
+  h.showCurrentOutput()
+  let finish
+  h.result(new Promise(resolve => { finish = resolve }))
+  const reading = h.showLog()
+  assert.equal(h.state().logLoading, true)
+  const count = h.calls.length
+  await h.showLog()
+  assert.equal(h.calls.length, count, "duplicate reads are blocked")
+  h.showCurrentOutput()
+  finish({ errno: 0, stdout: "late saved log", stderr: "" })
+  await reading
+  assert.equal(h.state().savedLogVisible, false)
+  assert.equal(h.state().logLoading, false)
+  assert.equal(h.state().output, "current output")
+  assert.equal(h.state().savedOutput, "[DONE] saved update")
+  h.result({ errno: 0, stdout: "new saved log", stderr: "" })
+  await h.showLog()
+  assert.equal(h.state().savedOutput, "new saved log")
+  h.result({ errno: 1, stdout: "", stderr: "read failed" })
+  await h.showLog()
+  assert.equal(h.state().savedOutput, "new saved log", "failed refresh preserves the previous saved log")
+  assert.equal(h.state().savedLogVisible, true)
+  h.showCurrentOutput()
+  assert.equal(h.state().output, "current output")
+})
+
+test("starting verification ignores an older saved-log response", async () => {
+  const h = harness()
+  h.seed()
+  let finish
+  h.result(new Promise(resolve => { finish = resolve }))
+  const reading = h.showLog()
+  h.result({ errno: 0, stdout: "RESULT: not revoked", stderr: "" })
+  await h.checkRevocation()
+  const current = h.state().output
+  finish({ errno: 0, stdout: "old saved log", stderr: "" })
+  await reading
+  assert.equal(h.state().savedLogVisible, false)
+  assert.equal(h.state().output, current)
+  assert.equal(h.state().savedOutput, "")
 })

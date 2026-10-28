@@ -6,6 +6,7 @@ export const policyKeys = ["os_patch", "vendor_patch", "boot_patch"] as const
 export type PolicyKey = typeof policyKeys[number]
 export type Policy = Record<string, string>
 export interface Target { package_name: string; mode: TargetMode }
+export type AppLabel = { label: string; installedAt?: number | null }
 export interface TargetPackage extends Target { system: boolean; selected: boolean; installed: boolean }
 export interface TargetDraft {
   targets: Target[]
@@ -25,6 +26,16 @@ export interface TargetStatus {
   revision: string
   config_error?: string
   packages_error?: string
+}
+
+type BackendLabel = { identity: string; name?: string; version?: string }
+export function targetBackendTitle(backend: BackendLabel | null | undefined, fallback: string): string {
+  if (!backend) return fallback
+  const names: Record<string, string> = {
+    TS: "Tricky Store", "TS-L": "Tricky Store", "TEES-RS": "TEESimulator-RS",
+    TEES: "TEESimulator", OMK: "OhMyKeymint",
+  }
+  return backend.name?.trim() || (Object.prototype.hasOwnProperty.call(names, backend.identity) ? names[backend.identity] : fallback)
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -115,7 +126,8 @@ export function targetSaveCommand(bin: string, revision: string, draft: TargetDr
 export function targetEntryCommand(bin: string, enabled: boolean): string {
   return shellQuote(bin) + " targets entry set " + (enabled ? "on" : "off")
 }
-export function visiblePackages(status: TargetStatus, draft: TargetDraft, query: string, filter = "listed", labels: ReadonlyMap<string, { label: string }> = new Map(), pinned?: ReadonlySet<string>): TargetPackage[] {
+export type TargetSort = "name" | "package" | "installed"
+export function visiblePackages(status: TargetStatus, draft: TargetDraft, query: string, filter = "listed", labels: ReadonlyMap<string, AppLabel> = new Map(), pinned?: ReadonlySet<string>, sort: TargetSort = "name", showSystem = false): TargetPackage[] {
   const selected = new Map(draft.targets.map(item => [item.package_name, item.mode]))
   const known = new Set(status.packages.map(item => item.package_name))
   const system = new Set(draft.system_apps)
@@ -128,7 +140,7 @@ export function visiblePackages(status: TargetStatus, draft: TargetDraft, query:
   }
   const search = query.trim().toLowerCase()
   return packages.filter(item => (item.package_name.toLowerCase().includes(search) || (labels.get(item.package_name)?.label ?? "").toLowerCase().includes(search)) &&
-    (filter === "listed" ? !item.system || system.has(item.package_name) || item.selected :
+    (filter === "listed" ? showSystem || !item.system || system.has(item.package_name) || item.selected :
       filter === "all" || (filter === "selected" ? item.selected : filter === "system" ? item.system : !item.system)))
-    .sort((a, b) => Number(pinned?.has(b.package_name) ?? b.selected) - Number(pinned?.has(a.package_name) ?? a.selected) || compareAppNames(labels.get(a.package_name)?.label || a.package_name, labels.get(b.package_name)?.label || b.package_name) || a.package_name.localeCompare(b.package_name))
+    .sort((a, b) => Number(pinned?.has(b.package_name) ?? b.selected) - Number(pinned?.has(a.package_name) ?? a.selected) || (sort === "installed" ? (labels.get(b.package_name)?.installedAt ?? -Infinity) - (labels.get(a.package_name)?.installedAt ?? -Infinity) : 0) || (sort === "package" ? a.package_name.localeCompare(b.package_name) : compareAppNames(labels.get(a.package_name)?.label || a.package_name, labels.get(b.package_name)?.label || b.package_name) || a.package_name.localeCompare(b.package_name)))
 }
