@@ -30,6 +30,13 @@ svg { flex-shrink: 0; }
   --accent-bg: #e6edff; --accent-ink: #fff; --red-bg: #fcecee;
   --success-bg: #e5f4eb; --warning: #8a6100; --warning-bg: #fff4cf;
   --log-source: #6941a5; --log-waiting: #8a5200; --log-failure: #b83240;
+  --glass-panel: var(--panel); --glass-floating: var(--panel); --glass-control: var(--panel);
+  --glass-inset: var(--inset); --glass-border: var(--line); --glass-toolbar: var(--bg);
+  --glass-highlight: #ffffffb3; --glass-blur: 24px;
+  --glass-shadow: 0 2px 8px #202b4206, 0 1px 2px #202b4205;
+  --glass-float-shadow: 0 12px 32px #202b4224, 0 2px 6px #202b4210;
+  --glass-dialog-shadow: 0 24px 64px #00000030, 0 4px 12px #00000014;
+  --glass-inset-shadow: inset 0 1px 3px #202b4205, inset 0 0 0 1px #202b4208;
   min-height: 100dvh; color: var(--text); background: var(--bg);
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   transition: background-color 180ms, color 180ms;
@@ -40,6 +47,11 @@ svg { flex-shrink: 0; }
   --accent-bg: #24375c; --accent-ink: #13264a; --red-bg: #3a2024;
   --success-bg: #18382b; --warning: #f3cf6e; --warning-bg: #3c321a;
   --log-source: #d4b3ff; --log-waiting: #f3c46e; --log-failure: #ff858c;
+  --glass-highlight: #edf2ff12;
+  --glass-shadow: 0 2px 10px #00000014, 0 1px 2px #0000001a;
+  --glass-float-shadow: 0 14px 36px #0000004d, 0 2px 8px #00000026;
+  --glass-dialog-shadow: 0 24px 64px #00000066, 0 4px 12px #00000033;
+  --glass-inset-shadow: inset 0 1px 3px #0000001a, inset 0 0 0 1px #edf2ff08;
 }
 @keyframes page-appear {
   from { opacity: 0; }
@@ -246,24 +258,78 @@ main.targets-search-docked .target-search::before { content: none; }
   .ui-check:not(:disabled):hover, .ui-radio:not(:disabled):hover { box-shadow: 0 0 0 4px var(--accent-bg); border-color: var(--accent); }
   .target-menu-item:not(:disabled):hover { background: var(--inset); }
 }
-.schedule-control { position: relative; isolation: isolate; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 2px; border-radius: 10px; background: var(--inset); }
-.schedule-indicator { position: absolute; z-index: -1; top: 2px; bottom: 2px; left: 2px; width: calc((100% - 20px) / 3); border-radius: 8px; background: var(--panel); box-shadow: 0 1px 3px #0000001a; opacity: 0; transition: transform 260ms cubic-bezier(.22, 1, .36, 1), opacity 150ms; }
+.schedule-control { position: relative; isolation: isolate; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 2px; border-radius: 10px; background: var(--glass-inset); box-shadow: var(--glass-inset-shadow); }
+.schedule-indicator { position: absolute; z-index: -1; top: 2px; bottom: 2px; left: 2px; width: calc((100% - 20px) / 3); border-radius: 8px; background: var(--glass-control); box-shadow: inset 0 1px 0 var(--glass-highlight), 0 1px 3px #0000001a; opacity: 0; transition: transform 260ms cubic-bezier(.22, 1, .36, 1), opacity 150ms; }
 .schedule-indicator.is-ready { opacity: 1; }
 .schedule-control button { min-width: 0; min-height: 32px; border-radius: 8px; padding: 2px; color: var(--muted); font-size: 12px; line-height: normal; transition: color 150ms; }
 .schedule-control button.is-active { color: var(--accent); font-weight: 600; }
 .schedule-control button:disabled { opacity: .6; }
-@supports ((backdrop-filter: blur(16px)) or (-webkit-backdrop-filter: blur(16px))) {
+.glass-panel { position: relative; isolation: isolate; border-color: var(--glass-border); box-shadow: inset 0 1px 0 var(--glass-highlight), var(--glass-shadow); }
+.glass-menu, .target-notice, .target-fab-secondary {
+  isolation: isolate;
+  border-color: var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), var(--glass-float-shadow);
+}
+.glass-inset { background: var(--glass-inset); box-shadow: var(--glass-inset-shadow); }
+.glass-control {
+  border-color: var(--glass-border);
+  background: var(--glass-control);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), var(--glass-shadow);
+}
+.target-search > div {
+  position: relative;
+  isolation: isolate;
+  background: var(--glass-control);
+  box-shadow: inset 0 0 0 1px var(--glass-border), inset 0 1px 0 var(--glass-highlight), var(--glass-shadow);
+  transition: box-shadow 180ms;
+}
+.target-search > div:focus-within { box-shadow: inset 0 0 0 1px var(--accent), var(--glass-shadow); }
+@supports (background: color-mix(in srgb, white 50%, transparent)) and ((backdrop-filter: blur(16px)) or (-webkit-backdrop-filter: blur(16px))) {
+  .app-shell {
+    --glass-panel: color-mix(in srgb, var(--panel) 86%, transparent);
+    --glass-floating: color-mix(in srgb, var(--panel) 84%, transparent);
+    --glass-control: color-mix(in srgb, var(--panel) 82%, transparent);
+    --glass-inset: color-mix(in srgb, var(--inset) 80%, transparent);
+    --glass-border: color-mix(in srgb, var(--line) 86%, transparent);
+    --glass-toolbar: color-mix(in srgb, var(--bg) 72%, transparent);
+  }
+  .glass-panel, .glass-menu, .target-notice, .target-fab-secondary { background: transparent; }
+  /* Separate glass layers keep fixed dropdowns in the viewport coordinate space. */
+  .glass-panel::before, .glass-menu::before, .target-notice::before, .target-fab-secondary::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--glass-floating, var(--panel));
+    box-shadow: inset 0 1px 0 var(--glass-highlight, transparent);
+    -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(1.12);
+    backdrop-filter: blur(var(--glass-blur, 24px)) saturate(1.12);
+    pointer-events: none;
+  }
+  .glass-panel::before {
+    background: var(--glass-panel);
+    -webkit-backdrop-filter: blur(14px) saturate(1.08);
+    backdrop-filter: blur(14px) saturate(1.08);
+  }
   .target-toolbar, .target-search { background: transparent; }
   .target-toolbar::before, .target-search::before, main.targets-search-docked::before {
-    background: color-mix(in srgb, var(--bg) 78%, transparent);
-    -webkit-backdrop-filter: blur(18px);
-    backdrop-filter: blur(18px);
+    background: var(--glass-toolbar);
+    -webkit-backdrop-filter: blur(22px) saturate(1.12);
+    backdrop-filter: blur(22px) saturate(1.12);
   }
-  .target-search > div { background: color-mix(in srgb, var(--panel) 85%, transparent); }
-  .target-menu {
-    background: color-mix(in srgb, var(--panel) 85%, transparent);
-    -webkit-backdrop-filter: blur(16px);
-    backdrop-filter: blur(16px);
+  main.targets-search-docked::before { box-shadow: 0 1px 0 var(--glass-border); }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .app-shell {
+    --glass-panel: var(--panel); --glass-floating: var(--panel); --glass-control: var(--panel);
+    --glass-inset: var(--inset); --glass-border: var(--line); --glass-toolbar: var(--bg);
+    --glass-highlight: transparent;
+  }
+  .glass-panel::before, .glass-menu::before, .target-notice::before, .target-fab-secondary::before,
+  .target-toolbar::before, .target-search::before, main.targets-search-docked::before {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 }
 @media (prefers-reduced-motion: reduce) {

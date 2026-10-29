@@ -201,6 +201,49 @@
     background: var(--inset);
   }
   footer :global(button) { min-height: 32px; min-width: 64px; padding: 4px 10px; border-radius: 6px; font-size: 12px; }
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) and (background: color-mix(in srgb, #fff 50%, transparent)) {
+    .modal {
+      isolation: isolate;
+      border-color: var(--glass-border, var(--line));
+      background: transparent;
+      box-shadow: var(--glass-dialog-shadow, 0 16px 48px #00000030);
+    }
+    .modal::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      border-radius: inherit;
+      background: var(--glass-floating, var(--panel));
+      box-shadow: inset 0 1px 0 var(--glass-highlight, transparent);
+      -webkit-backdrop-filter: blur(var(--glass-blur, 24px));
+      backdrop-filter: blur(var(--glass-blur, 24px));
+      pointer-events: none;
+    }
+    .modal::backdrop {
+      -webkit-backdrop-filter: blur(3px);
+      backdrop-filter: blur(3px);
+    }
+    header {
+      border-bottom-color: var(--glass-border, var(--line));
+      background: color-mix(in srgb, var(--panel) 20%, transparent);
+    }
+    footer {
+      border-top-color: var(--glass-border, var(--line));
+      background: color-mix(in srgb, var(--inset) 65%, transparent);
+    }
+  }
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .modal {
+      border-color: var(--line);
+      background: var(--panel);
+      box-shadow: var(--glass-dialog-shadow, 0 16px 48px #00000030);
+    }
+    .modal::before { content: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+    .modal::backdrop { -webkit-backdrop-filter: none; backdrop-filter: none; }
+    header { border-bottom-color: var(--line); background: transparent; }
+    footer { border-top-color: var(--line); background: var(--inset); }
+  }
   .modal[data-closing="true"] { animation: modal-exit 150ms ease-in both; }
   .modal[data-closing="true"]::backdrop { animation: backdrop-exit 150ms ease-in both; }
   .modal[data-reduced-motion="true"], .modal[data-reduced-motion="true"]::backdrop { animation-duration: 0ms; }

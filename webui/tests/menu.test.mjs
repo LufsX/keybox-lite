@@ -36,11 +36,14 @@ function harness({ saved, storageFails = false } = {}) {
       targetLinkTitle: () => targetBackendTitle(info?.backend, messages[lang].targetsTitle),
       showLog, showCurrentOutput, checkRevocation, update, loadInfo, shellQuote,
       seed: () => { setOutput("current output"); checkRc = 1 },
+      setBusy: value => { busy = value },
+      setError: value => { error = value },
       state: () => ({ lang, theme, themeOpen, languageOpen, savedLogVisible, output, savedOutput, savedOutputLines, logLoading, checkRc, certificateVerification, info, infoStale, error, busy })
     }
   `
   runInNewContext(compile(source + hooks), {
     exports: module.exports,
+    AbortController,
     require(name) {
       if (name === "svelte") return { onMount() {}, tick: () => Promise.resolve() }
       if (name === "./lib/i18n") return locale
@@ -117,12 +120,13 @@ function dropdownHarness({ disabled = false } = {}) {
     exports: module.exports,
     require(name) {
       if (name === "../ui") return loadModule("../src/lib/ui.ts")
-      if (name === "svelte") return { tick: () => Promise.resolve() }
+      if (name === "svelte") return { onMount() {}, tick: () => Promise.resolve() }
       return {}
     },
     Node,
     requestAnimationFrame: callback => callback(),
     $state: value => value,
+    $effect() {},
     document: { activeElement: null },
     $props: () => ({
       open: true, disabled, options: [{ value: "en" }, { value: "ja" }, { value: "zh" }], selected: "ja",
@@ -342,7 +346,7 @@ test("missing saved log is explicit; a failed read preserves current output and 
   await failed.showLog()
   assert.equal(failed.state().output, "current output")
   assert.equal(failed.state().checkRc, 1)
-  assert.equal(failed.state().savedLogVisible, false)
+  assert.equal(failed.state().savedLogVisible, true)
   assert.equal(failed.state().error, "permission denied")
   assert.equal(failed.state().busy, null)
 })
@@ -517,7 +521,7 @@ test("time-invalid output with rc3 retains its original hint only for a verified
   }
 })
 
-test("returning to current output cancels a pending saved-log view without losing either buffer", async () => {
+test("switching output views shares a pending log read without replacing the selected view", async () => {
   const h = harness()
   h.seed()
   await h.showLog()
@@ -535,7 +539,7 @@ test("returning to current output cancels a pending saved-log view without losin
   assert.equal(h.state().savedLogVisible, false)
   assert.equal(h.state().logLoading, false)
   assert.equal(h.state().output, "current output")
-  assert.equal(h.state().savedOutput, "[DONE] saved update")
+  assert.equal(h.state().savedOutput, "late saved log")
   h.result({ errno: 0, stdout: "new saved log", stderr: "" })
   await h.showLog()
   assert.equal(h.state().savedOutput, "new saved log")
@@ -547,7 +551,39 @@ test("returning to current output cancels a pending saved-log view without losin
   assert.equal(h.state().output, "current output")
 })
 
-test("starting verification ignores an older saved-log response", async () => {
+test("updates, checks and refreshes do not block log navigation or duplicate a pending read", async () => {
+  for (const busy of ["update", "check", "refresh"]) {
+    const h = harness()
+    h.seed()
+    await h.showLog()
+    h.showCurrentOutput()
+    h.setBusy(busy)
+    h.setError("operation warning")
+    let finish
+    h.result(new Promise(resolve => { finish = resolve }))
+    const reading = h.showLog()
+    assert.equal(h.state().savedLogVisible, true, busy + ": cached logs select immediately")
+    assert.equal(h.state().savedOutput, "[DONE] saved update")
+    assert.equal(h.state().error, "operation warning", "view changes preserve operation errors")
+    const reads = h.calls.length
+    h.showCurrentOutput()
+    assert.equal(h.state().savedLogVisible, false)
+    assert.equal(h.state().logLoading, true, "navigation preserves the shared read")
+    await h.showLog()
+    assert.equal(h.state().savedLogVisible, true)
+    assert.equal(h.calls.length, reads, "a loading view remains selectable without another command")
+    h.showCurrentOutput()
+    finish({ errno: 0, stdout: "saved during " + busy, stderr: "" })
+    await reading
+    assert.equal(h.state().savedLogVisible, false)
+    assert.equal(h.state().savedOutput, "saved during " + busy)
+    assert.equal(h.state().output, "current output")
+    assert.equal(h.state().busy, busy)
+    assert.equal(h.state().logLoading, false)
+  }
+})
+
+test("starting verification retains its current view while an older log read fills the saved buffer", async () => {
   const h = harness()
   h.seed()
   let finish
@@ -560,5 +596,5 @@ test("starting verification ignores an older saved-log response", async () => {
   await reading
   assert.equal(h.state().savedLogVisible, false)
   assert.equal(h.state().output, current)
-  assert.equal(h.state().savedOutput, "")
+  assert.equal(h.state().savedOutput, "old saved log")
 })

@@ -8,9 +8,12 @@
   const persisted = new LogBuffer(8000)
   persisted.replace(Array.from({ length: 60 }, (_, index) => "Saved log " + index).join("\n"))
   async function readSaved() {
-    loading = true
-    await new Promise(resolve => setTimeout(resolve, (window as unknown as { latency?: number }).latency ?? 20))
     saved = true
+    if (loading) return
+    loading = true
+    const host = window as unknown as { latency?: number; savedReads?: number }
+    host.savedReads = (host.savedReads ?? 0) + 1
+    await new Promise(resolve => setTimeout(resolve, host.latency ?? 20))
     loading = false
   }
 </script>

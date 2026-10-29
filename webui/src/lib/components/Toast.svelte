@@ -119,6 +119,22 @@
   @media (hover: hover) {
     .close:hover { background: var(--toast-hover); opacity: 1; }
   }
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) and (background: color-mix(in srgb, #fff 50%, transparent)) {
+    .toast {
+      background: color-mix(in srgb, var(--toast-bg) 92%, transparent);
+      -webkit-backdrop-filter: blur(var(--glass-blur, 24px));
+      backdrop-filter: blur(var(--glass-blur, 24px));
+      box-shadow: var(--glass-float-shadow, 0 4px 12px #00000014, 0 12px 32px #0000001f), inset 0 1px 0 var(--glass-highlight, transparent);
+    }
+  }
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .toast {
+      background: var(--toast-bg);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      box-shadow: var(--glass-float-shadow, 0 4px 12px #00000014, 0 12px 32px #0000001f);
+    }
+  }
   @media (prefers-reduced-motion: reduce) {
     .close { transition: none; }
   }

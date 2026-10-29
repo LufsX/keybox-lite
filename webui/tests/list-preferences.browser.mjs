@@ -117,7 +117,7 @@ try {
   await page.waitForTimeout(120)
   await rows(["Zulu", "Alpha"])
   assert.ok((await sortTrigger.innerText()).includes("包名"), "selection stays on the applied sort while dates load")
-  await page.waitForFunction(() => document.querySelector('[aria-label="排序"]').textContent.includes("最近安装"))
+  await page.waitForFunction(() => document.querySelector('button[aria-label="排序"]').textContent.includes("最近安装"))
   await page.waitForTimeout(45)
   const middleTop = (await movingRow.boundingBox()).y
   await rows(["Alpha", "Zulu"])

@@ -178,6 +178,7 @@
   let logLoading = $state(false)
   let refreshVisible = $state(false)
   let logSequence = 0
+  let logMonitor: AbortController | undefined
   let error = $state("")
   let checkRc = $state<number | null>(null)
   let certificateVerification = $state<CertificateVerification | null>(null)
@@ -549,28 +550,31 @@
 
   function showCurrentOutput() {
     savedLogVisible = false
-    logSequence++
-    logLoading = false
   }
 
   async function showLog() {
-    if (!moddir || busy !== null || logLoading) return
+    if (!moddir) return
+    savedLogVisible = true
+    if (logLoading) return
     const sequence = ++logSequence
+    const controller = new AbortController()
+    logMonitor = controller
     logLoading = true
-    error = ""
     try {
-      const r = await exec('if [ -f /data/local/tmp/keybox-update.log ]; then tail -n 80 /data/local/tmp/keybox-update.log; fi')
+      const r = await exec('if [ -f /data/local/tmp/keybox-update.log ]; then tail -n 80 /data/local/tmp/keybox-update.log; fi', undefined, 15_000, controller.signal)
       if (disposed || sequence !== logSequence) return
       requireSuccess(r, m.logFailed)
       const buffer = new LogBuffer(OUTPUT_LIMIT)
       buffer.replace(r.stdout.trim() || m.noLog)
       savedOutput = buffer.text
       savedOutputLines = buffer.lines.slice()
-      savedLogVisible = true
     } catch (cause) {
-      if (!disposed && sequence === logSequence) error = cause instanceof Error ? cause.message : String(cause)
+      if (!disposed && sequence === logSequence) {
+        const detail = cause instanceof Error ? cause.message : String(cause)
+        error = [error, detail].filter(Boolean).join("\n")
+      }
     } finally {
-      if (!disposed && sequence === logSequence) logLoading = false
+      if (!disposed && sequence === logSequence) { logLoading = false; logMonitor = undefined }
     }
   }
 
@@ -589,6 +593,9 @@
     void initialize()
     return () => {
       disposed = true
+      logSequence++
+      logMonitor?.abort()
+      logMonitor = undefined
       updateMonitor?.abort()
       window.removeEventListener("hashchange", syncRoute)
       clearTimeout(outputTimer)
@@ -672,11 +679,11 @@
             </dl>
             {#if info.exists}
               <div class="grid grid-cols-2 gap-1.5">
-                <div class="flex min-w-0 flex-col gap-1 rounded-[9px] bg-[var(--inset)] p-2">
+                <div class="glass-inset flex min-w-0 flex-col gap-1 rounded-[9px] bg-[var(--inset)] p-2">
                   <span class="text-[11px] leading-snug text-[var(--muted)]">{m.validity}</span>
                   <span class={statusValue + (info.validity?.status === "valid" ? " text-[var(--success)]" : info.validity?.status === "expired" || info.validity?.status === "not_yet_valid" ? " text-[var(--warning)]" : "")}>{validityLabel(info.validity?.status)}</span>
                 </div>
-                <div class="flex min-w-0 flex-col gap-1 rounded-[9px] bg-[var(--inset)] p-2" aria-live="polite">
+                <div class="glass-inset flex min-w-0 flex-col gap-1 rounded-[9px] bg-[var(--inset)] p-2" aria-live="polite">
                   <span class="text-[11px] leading-snug text-[var(--muted)]">{m.revocationStatus}</span>
                   <span class={statusValue + (checkRc === 1 ? " text-[var(--red)]" : checkRc === 0 ? " text-[var(--success)]" : "")}>
                     {#if busy === "check"}<Loader2 size={13} class="motion-safe:animate-spin" />{m.checking}
@@ -738,11 +745,11 @@
           {cancelling ? m.stopping : cancelRequested ? m.stopRequested : !updateRunning ? m.refreshing : m.stopUpdate}
         {:else}<Download size={17} />{m.update}{/if}
       </button>
-      <button class="{ui.button} border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]" onclick={checkRevocation} disabled={busy !== null || !moddir}>
+      <button class="{ui.button} glass-control border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]" onclick={checkRevocation} disabled={busy !== null || !moddir}>
         {#if busy === "check"}<Loader2 size={16} class="motion-safe:animate-spin" />{:else}<ShieldCheck size={16} />{/if}
         {busy === "check" ? m.checking : m.check}
       </button>
-      <button class="{ui.button} border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]" class:!opacity-100={busy === "refresh"} onclick={refresh} disabled={busy !== null} aria-busy={busy === "refresh"}>
+      <button class="{ui.button} glass-control border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]" class:!opacity-100={busy === "refresh"} onclick={refresh} disabled={busy !== null} aria-busy={busy === "refresh"}>
         <RefreshCw size={16} class={refreshVisible ? "motion-safe:animate-spin" : ""} />{m.refresh}
       </button>
     </div>
@@ -787,7 +794,7 @@
     <LogOutput output={savedLogVisible ? savedOutput : output} lines={savedLogVisible ? savedOutputLines : outputLines}
       title={m.output} hint={m.hint} currentLabel={m.currentOutput} savedLabel={m.savedUpdateLog}
       loadingLabel={m.loading} saved={savedLogVisible} loading={logLoading}
-      disabled={busy !== null || !moddir} onCurrent={showCurrentOutput} onSaved={showLog} />
+      disabled={!moddir} onCurrent={showCurrentOutput} onSaved={showLog} />
     </div>
     {/if}
   </main>

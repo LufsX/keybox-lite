@@ -637,7 +637,7 @@
   <h1 use:trackTitle class="mb-3 text-xl font-[650] leading-[1.35] tracking-[-.6px] max-[359px]:text-lg">{targetBackendTitle(status?.backend, m.targetsTitle)}</h1>
   {#if menuOpen}
     <div bind:this={menuElement} id="targets-menu" role="menu" aria-label={m.targetsMore}
-      class="target-menu fixed z-50 grid w-64 overflow-y-auto" transition:surface>
+      class="target-menu glass-menu fixed z-50 grid w-64 overflow-y-auto" transition:surface>
       {#each [
         { value: "select", label: m.targetsSelectVisible, icon: CheckCheck, blocked: !editable },
         { value: "clear", label: m.targetsClearVisible, icon: SquareDashed, blocked: !editable },

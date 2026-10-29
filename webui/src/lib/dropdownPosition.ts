@@ -19,17 +19,21 @@ export function dropdownPosition(anchor: Bounds, menu: { width: number; height: 
   }
 }
 
+const fallbackDialogs = new WeakMap<HTMLDialogElement, { count: number; overflow: string }>()
+
+// The action lives through the global outro, including when its owner is removed.
 // Keep the fallback inside its modal so showModal() does not make it inert.
-export function floatingDropdown(node: HTMLElement, anchor: HTMLButtonElement) {
+export function floatingDropdown(node: HTMLElement, { anchor, onClose }: { anchor: HTMLButtonElement; onClose: () => void }) {
   const dialog = anchor.closest("dialog")
   const viewport = window.visualViewport
   let disposed = false
   let frame = 0
   let topLayer = false
   let moved = false
-  let previousOverflow: string | undefined
+  let releaseOverflow: (() => void) | undefined
   let trackingUntil = 0
   let observer: ResizeObserver | undefined
+  let dialogObserver: MutationObserver | undefined
   node.style.visibility = "hidden"
 
   function position() {
@@ -73,18 +77,44 @@ export function floatingDropdown(node: HTMLElement, anchor: HTMLButtonElement) {
     schedule()
   }
 
+  function dialogStateChanged() {
+    if (!disposed && !node.inert && dialog && (!dialog.open || dialog.dataset.closing === "true")) {
+      node.inert = true
+      onClose()
+    }
+  }
+
   // Actions run before Svelte inserts the node. Popovers require a connected node.
   frame = requestAnimationFrame(() => {
     frame = 0
     if (disposed) return
+    if (dialog && (!dialog.open || dialog.dataset.closing === "true")) {
+      dialogStateChanged()
+      return
+    }
     if (typeof node.showPopover === "function") {
       node.setAttribute("popover", "manual")
       try { node.showPopover(); topLayer = true } catch { node.removeAttribute("popover") }
     }
-    if (!topLayer && dialog) {
-      previousOverflow = dialog.style.overflow
-      dialog.style.overflow = "visible"
-      dialog.appendChild(node)
+    if (!topLayer) {
+      if (dialog) {
+        let shared = fallbackDialogs.get(dialog)
+        if (!shared) {
+          shared = { count: 0, overflow: dialog.style.overflow }
+          fallbackDialogs.set(dialog, shared)
+          dialog.style.overflow = "visible"
+        }
+        shared.count++
+        releaseOverflow = () => {
+          if (--shared.count === 0) {
+            dialog.style.overflow = shared.overflow
+            fallbackDialogs.delete(dialog)
+          }
+        }
+      }
+      // Keep fallback menus outside card and toolbar stacking contexts.
+      const host = dialog ?? anchor.closest(".app-shell") ?? document.body
+      host.appendChild(node)
       moved = true
     }
     window.addEventListener("scroll", schedule, true)
@@ -93,6 +123,11 @@ export function floatingDropdown(node: HTMLElement, anchor: HTMLButtonElement) {
     viewport?.addEventListener("resize", schedule)
     dialog?.addEventListener("animationend", animationFinished)
     dialog?.addEventListener("animationcancel", animationFinished)
+    dialog?.addEventListener("close", dialogStateChanged)
+    if (dialog) {
+      dialogObserver = new MutationObserver(dialogStateChanged)
+      dialogObserver.observe(dialog, { attributes: true, attributeFilter: ["open", "data-closing"] })
+    }
     if (typeof ResizeObserver !== "undefined") {
       observer = new ResizeObserver(schedule)
       observer.observe(anchor)
@@ -110,14 +145,16 @@ export function floatingDropdown(node: HTMLElement, anchor: HTMLButtonElement) {
       disposed = true
       cancelAnimationFrame(frame)
       observer?.disconnect()
+      dialogObserver?.disconnect()
       window.removeEventListener("scroll", schedule, true)
       window.removeEventListener("resize", schedule)
       viewport?.removeEventListener("scroll", schedule)
       viewport?.removeEventListener("resize", schedule)
       dialog?.removeEventListener("animationend", animationFinished)
       dialog?.removeEventListener("animationcancel", animationFinished)
+      dialog?.removeEventListener("close", dialogStateChanged)
       if (topLayer) { try { node.hidePopover() } catch { /* Already removed by the owner. */ } }
-      if (dialog && previousOverflow !== undefined) dialog.style.overflow = previousOverflow
+      releaseOverflow?.()
       // Svelte may remove the original range before destroying the action.
       if (moved) node.remove()
     },

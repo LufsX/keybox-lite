@@ -1,5 +1,5 @@
 <script lang="ts" generics="Value extends string">
-  import { tick, type Snippet } from "svelte"
+  import { onMount, tick, type Snippet } from "svelte"
   import { surface } from "../motion"
   import { Check, ChevronDown } from "lucide-svelte"
   import { floatingDropdown } from "../dropdownPosition"
@@ -26,12 +26,60 @@
   let control: HTMLDivElement
   let button = $state<HTMLButtonElement>(null!)
   let menu = $state<HTMLDivElement>(null!)
+  let systemReducedMotion = $state(false)
+
+  function finishMotion() {
+    if (!reducedMotion && !systemReducedMotion) return
+    for (const animation of menu?.getAnimations() ?? []) {
+      if (animation.playState === "finished") continue
+      // Svelte may replace its initial delay animation with the surface animation.
+      animation.addEventListener("finish", finishMotion, { once: true })
+      animation.finish()
+    }
+  }
+
+  function menuSurface(node: HTMLElement) {
+    return ({ direction = "in" }: { direction?: "in" | "out" } = {}) => surface(node, {
+      duration: reducedMotion || systemReducedMotion ? 0 : direction === "in" ? 160 : 120,
+    })
+  }
+
+  onMount(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)")
+    function dropdownMotionChanged() {
+      systemReducedMotion = media.matches
+      if (media.matches) finishMotion()
+    }
+    dropdownMotionChanged()
+    media.addEventListener("change", dropdownMotionChanged)
+    return () => media.removeEventListener("change", dropdownMotionChanged)
+  })
+
+  $effect(() => {
+    if (reducedMotion || systemReducedMotion) {
+      // Also finish an exit already in progress when the preference changes.
+      finishMotion()
+    }
+  })
+
+  $effect(() => {
+    if (disabled && open) onOpenChange(false)
+  })
+
+  function exitStarted() {
+    if (!menu) return
+    menu.setAttribute("aria-hidden", "true")
+    if (menu.contains(document.activeElement)) {
+      if (!disabled && button?.isConnected && !button.closest("dialog:not([open])")) button.focus({ preventScroll: true })
+      else if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+    }
+  }
 
   function dismiss(event: Event) {
     if (open && event.target instanceof Node && !control?.contains(event.target) && !menu?.contains(event.target)) onOpenChange(false)
   }
   function keydown(event: KeyboardEvent) {
-    if (event.key === "Escape" && open) {
+    if (event.key === "Escape" && open && !disabled && !menu?.inert) {
       event.preventDefault()
       event.stopImmediatePropagation()
       onOpenChange(false)
@@ -48,7 +96,7 @@
       await tick()
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
     }
-    if (!open || disabled) return
+    if (!open || disabled || menu?.inert) return
     const items = Array.from(menu?.querySelectorAll<HTMLButtonElement>("[data-option]") ?? [])
     if (!items.length) return
     const index = items.indexOf(document.activeElement as HTMLButtonElement)
@@ -58,7 +106,7 @@
     items[next]?.focus()
   }
   function select(value: Value) {
-    if (disabled) return
+    if (!open || disabled || menu?.inert) return
     onSelect(value)
     onOpenChange(false)
     button?.focus()
@@ -73,13 +121,16 @@
     {#if trigger}{@render trigger()}{:else}<span>{options.find(option => option.value === selected)?.label ?? selected}</span><ChevronDown size={14} />{/if}
   </button>
   {#if open && !disabled}
-    <div {id} bind:this={menu} use:floatingDropdown={button} class={ui.menu + " dropdown-menu overflow-y-auto overscroll-contain"} role="group" aria-label={label} in:surface={{ duration: reducedMotion ? 0 : 160 }}>
+    <div {id} bind:this={menu} use:floatingDropdown={{ anchor: button, onClose: () => onOpenChange(false) }}
+      class={ui.menu + " dropdown-menu overflow-y-auto overscroll-contain"} role="group" aria-label={label}
+      transition:menuSurface|global
+      onoutrostart={exitStarted} onintrostart={() => menu?.removeAttribute("aria-hidden")}>
       {#each options as option}
         <button type="button" data-option class={ui.menuItem + (selected === option.value ? " " + ui.menuItemActive : "")} onclick={() => select(option.value)} onkeydown={navigate} aria-pressed={selected === option.value}>
           {#if optionIcon}{@render optionIcon(option.value)}{/if}
           <span lang={option.lang}>{option.label}</span>
           <span class="grid size-[14px] !flex-none place-items-center">
-            {#if selected === option.value}<span class="grid" in:surface={{ y: 0 }}><Check size={14} /></span>{/if}
+            {#if selected === option.value}<span class="grid" in:surface={{ y: 0, duration: reducedMotion || systemReducedMotion ? 0 : 160 }}><Check size={14} /></span>{/if}
           </span>
         </button>
       {/each}
@@ -88,8 +139,10 @@
 </div>
 
 <style>
+  .dropdown-menu:global([inert]) { pointer-events: none; }
   .dropdown-menu {
     position: fixed;
+    z-index: 60;
     inset: auto;
     margin: 0;
     box-sizing: border-box;

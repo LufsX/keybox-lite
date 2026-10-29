@@ -100,7 +100,7 @@
 <section class={ui.panel}>
   <div class={ui.heading}>
     <h2 class={ui.headingTitle}><Terminal size={17} />{title}</h2>
-    <BusyIndicator active={loading} label={loadingLabel} />
+    <BusyIndicator active={saved && loading} label={loadingLabel} />
   </div>
   <div class="mb-2 flex items-center gap-1">
     <div class="log-views" use:followSelection={saved} role="group" aria-label={title}>
@@ -108,13 +108,13 @@
         style:width={indicator.width + "px"} style:height={indicator.height + "px"}
         style:transform={"translate(" + indicator.x + "px, " + indicator.y + "px)"}></span>
       <button type="button" aria-pressed={!saved} aria-controls={id} onclick={onCurrent}>{currentLabel}</button>
-      <button type="button" aria-pressed={saved} aria-controls={id} class:is-disabled={disabled} disabled={disabled || loading}
+      <button type="button" aria-pressed={saved} aria-controls={id} class:is-disabled={disabled} {disabled} aria-busy={loading}
         onclick={onSaved}>{savedLabel}</button>
     </div>
   </div>
   <div class="log-content" style:height={contentHeight + "px"}>
     {#key saved}
-      <pre {id} use:measureBody={{ view: saved, content: output }} aria-label={saved ? savedLabel : currentLabel} aria-busy={loading}
+      <pre {id} use:measureBody={{ view: saved, content: output }} aria-label={saved ? savedLabel : currentLabel} aria-busy={saved && loading}
         class="log-body m-0 max-h-[300px] w-full overflow-y-auto whitespace-pre-wrap p-2 font-mono text-[11px] leading-normal text-[var(--text)] [overflow-wrap:anywhere]"
         in:surface={{ y: 3, scale: 1, duration: 200 }} out:leave>{#if output}{#each lines as line (line)}{#each line.parts as part}<span class={part.tone ? toneClasses[part.tone] : undefined}>{part.text}</span>{/each}{/each}{:else}{hint}{/if}</pre>
     {/key}
@@ -122,14 +122,14 @@
 </section>
 
 <style>
-  .log-views { position: relative; isolation: isolate; display: flex; flex-wrap: wrap; gap: 2px; min-width: 0; padding: 2px; border-radius: 6px; background: var(--inset); }
-  .log-view-indicator { position: absolute; z-index: -1; top: 0; left: 0; border-radius: 4px; background: var(--panel); box-shadow: 0 1px 3px #0000001a; opacity: 0; pointer-events: none; }
+  .log-views { position: relative; isolation: isolate; display: flex; flex-wrap: wrap; gap: 2px; min-width: 0; padding: 2px; border-radius: 6px; background: var(--glass-inset, var(--inset)); box-shadow: var(--glass-inset-shadow, none); }
+  .log-view-indicator { position: absolute; z-index: -1; top: 0; left: 0; border-radius: 4px; background: var(--glass-control, var(--panel)); box-shadow: inset 0 1px 0 var(--glass-highlight, transparent), 0 1px 3px #0000001a; opacity: 0; pointer-events: none; }
   .log-view-indicator.is-ready { opacity: 1; transition: transform 260ms cubic-bezier(.22, 1, .36, 1), width 260ms cubic-bezier(.22, 1, .36, 1), height 260ms cubic-bezier(.22, 1, .36, 1), opacity 150ms; }
   .log-views button { min-height: 28px; min-width: 0; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 550; color: var(--muted); overflow-wrap: anywhere; transition: color 150ms; }
   .log-views button[aria-pressed="true"] { color: var(--accent); }
   .log-views button:disabled { cursor: default; }
   .log-views button.is-disabled { opacity: .5; }
-  .log-content { position: relative; overflow: hidden; border-radius: 8px; background: var(--inset); transition: height 260ms cubic-bezier(.22, 1, .36, 1); }
+  .log-content { position: relative; overflow: hidden; border-radius: 8px; background: var(--glass-inset, var(--inset)); box-shadow: var(--glass-inset-shadow, none); transition: height 260ms cubic-bezier(.22, 1, .36, 1); }
   .log-body { position: absolute; inset: 0 0 auto; }
   @media (prefers-reduced-motion: reduce) { .log-content, .log-views button, .log-view-indicator.is-ready { transition: none; } }
 </style>
