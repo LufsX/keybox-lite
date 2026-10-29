@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, type Snippet } from "svelte"
   import { ui } from "../ui"
+  import { registerModalBack } from "../modalBack"
 
   interface Props {
     title: string
@@ -21,6 +22,11 @@
 
   const id = $props.id()
   let dialog: HTMLDialogElement
+  let content: HTMLDivElement
+  let heading: HTMLElement
+  let actions: HTMLElement | undefined = $state()
+  let resizeFrame = 0
+  let observer: ResizeObserver | undefined
   let closeButton: HTMLButtonElement
   let closing = $state(false)
   let reducedMotion = $state(false)
@@ -29,6 +35,7 @@
   let completed = false
   let backdropPointer: number | undefined
   let restoreFocus = () => {}
+  let releaseBack: () => Promise<void> = () => Promise.resolve()
 
   function cancelClose() {
     clearTimeout(timer)
@@ -36,7 +43,7 @@
     closing = false
   }
 
-  function finishClose() {
+  async function finishClose() {
     if (disposed || completed || !closing) return
     if (busy) {
       cancelClose()
@@ -46,6 +53,8 @@
     timer = undefined
     completed = true
     dialog.close()
+    await releaseBack()
+    if (disposed) return
     restoreFocus()
     onclose()
   }
@@ -92,6 +101,7 @@
       if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true })
     }
     const previousOverflow = document.body.style.overflow
+    let removeResize = () => {}
     const media = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-reduced-motion: reduce)") : undefined
     reducedMotion = media?.matches ?? false
     const motionChanged = () => {
@@ -102,9 +112,41 @@
     document.body.style.overflow = "hidden"
     try {
       dialog.showModal()
+      releaseBack = registerModalBack(() => {
+        if (busy) return false
+        requestClose()
+        return true
+      })
+      const resize = () => {
+        cancelAnimationFrame(resizeFrame)
+        resizeFrame = requestAnimationFrame(() => {
+          if (disposed || !dialog.open || closing) return
+          const body = getComputedStyle(contentElement!)
+          const style = getComputedStyle(dialog)
+          const wanted = heading.offsetHeight + (actions?.offsetHeight ?? 0) + content.offsetHeight +
+            parseFloat(body.paddingTop) + parseFloat(body.paddingBottom) +
+            parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth)
+          const height = Math.min(wanted, parseFloat(style.maxHeight))
+          if (Number.isFinite(height) && Math.abs(parseFloat(dialog.style.height || "0") - height) > 0.5) {
+            dialog.style.height = height + "px"
+          }
+        })
+      }
+      window.addEventListener("resize", resize)
+      window.visualViewport?.addEventListener("resize", resize)
+      removeResize = () => {
+        window.removeEventListener("resize", resize)
+        window.visualViewport?.removeEventListener("resize", resize)
+      }
+      observer = new ResizeObserver(resize)
+      observer.observe(content)
+      observer.observe(heading)
+      if (actions) observer.observe(actions)
+      resize()
       if (busy) dialog.focus({ preventScroll: true })
       else closeButton.focus({ preventScroll: true })
     } catch (error) {
+      releaseBack()
       document.body.style.overflow = previousOverflow
       media?.removeEventListener?.("change", motionChanged)
       restoreFocus()
@@ -112,7 +154,11 @@
     }
     return () => {
       disposed = true
+      releaseBack()
       clearTimeout(timer)
+      observer?.disconnect()
+      removeResize()
+      cancelAnimationFrame(resizeFrame)
       media?.removeEventListener?.("change", motionChanged)
       if (dialog.open) dialog.close()
       document.body.style.overflow = previousOverflow
@@ -136,7 +182,7 @@
   onpointerup={pointerup}
   onpointercancel={() => { backdropPointer = undefined }}
 >
-  <header>
+  <header bind:this={heading}>
     <div class="heading">
       <h2 id={id + "-title"}>{title}</h2>
       {#if description}<p id={id + "-description"}>{description}</p>{/if}
@@ -146,10 +192,10 @@
     </button>
   </header>
   <div class="body" data-modal-scroll bind:this={contentElement}>
-    {@render children()}
+    <div class="content" bind:this={content}>{@render children()}</div>
   </div>
   {#if footer && !hideFooter}
-    <footer>{@render footer(requestClose)}</footer>
+    <footer bind:this={actions}>{@render footer(requestClose)}</footer>
   {/if}
 </dialog>
 
@@ -173,6 +219,7 @@
     line-height: 1.5;
     box-shadow: 0 16px 48px #00000030;
     animation: modal-enter 150ms ease-out both;
+    transition: height 180ms cubic-bezier(.2, .7, .2, 1);
   }
   .modal[open] { display: flex; flex-direction: column; }
   .modal::backdrop { background: #00000066; animation: backdrop-enter 150ms ease-out both; }
@@ -181,7 +228,7 @@
     flex: 0 0 auto;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px;
+    padding: 8px var(--content-padding);
     border-bottom: 1px solid var(--line);
   }
   .heading { flex: 1; min-width: 0; }
@@ -189,18 +236,37 @@
   .modal-close { width: 28px; height: 28px; padding: 4px; border-radius: 6px; }
   p { margin: 2px 0 0; color: var(--muted); overflow-wrap: anywhere; }
   button:disabled { opacity: .48; cursor: default; }
-  .body { flex: 1 1 auto; min-height: 0; padding: var(--content-padding); overflow: auto; overscroll-behavior: contain; scroll-padding-top: calc(32px + 2 * var(--content-padding)); scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+  .body { flex: 1 1 auto; min-height: 0; padding: 14px var(--content-padding); overflow: auto; overscroll-behavior: contain; scroll-padding-top: calc(32px + 2 * var(--content-padding)); scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
   footer {
     display: flex;
     flex: 0 0 auto;
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 6px;
-    padding: 6px 10px;
+    padding: 8px var(--content-padding);
     border-top: 1px solid var(--line);
     background: var(--inset);
   }
-  footer :global(button) { min-height: 32px; min-width: 64px; padding: 4px 10px; border-radius: 6px; font-size: 12px; }
+  .content { min-width: 0; }
+  .modal-close, footer :global(button) {
+    border: 1px solid var(--line);
+    background: var(--glass-inset, var(--inset));
+    box-shadow: inset 0 1px 0 var(--glass-highlight, transparent);
+  }
+  footer :global(button) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 32px;
+    min-width: 0;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 550;
+    line-height: 1.5;
+  }
+  .modal-close:hover:enabled, footer :global(button:hover:enabled) { border-color: var(--accent); background: var(--accent-bg); }
   @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) and (background: color-mix(in srgb, #fff 50%, transparent)) {
     .modal {
       isolation: isolate;
@@ -248,6 +314,7 @@
   .modal[data-closing="true"]::backdrop { animation: backdrop-exit 150ms ease-in both; }
   .modal[data-reduced-motion="true"], .modal[data-reduced-motion="true"]::backdrop { animation-duration: 0ms; }
   @media (prefers-reduced-motion: reduce) {
+    .modal { transition: none; }
     .modal, .modal::backdrop { animation-duration: 0ms; }
   }
   @keyframes modal-enter { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }

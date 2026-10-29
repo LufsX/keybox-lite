@@ -5,6 +5,7 @@ export const ui = {
   heading: "mb-3 flex min-h-[22px] items-center justify-between gap-2",
   headingTitle: "flex min-w-0 items-center gap-1.5 text-sm font-semibold [&_svg]:text-[var(--muted)]",
   textButton: "inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2 py-1 text-[11px] leading-normal text-[var(--accent)] transition-colors duration-150 hover:enabled:bg-[var(--inset)] disabled:opacity-50",
+  compactButton: "inline-flex min-h-8 min-w-0 shrink-0 items-center justify-center gap-1.5 rounded-[6px] border border-[var(--line)] bg-[var(--glass-inset,var(--inset))] px-2.5 py-1 text-xs font-[550] leading-normal text-[var(--accent)] shadow-[inset_0_1px_0_var(--glass-highlight,transparent)] transition duration-150 hover:enabled:border-[var(--accent)] hover:enabled:bg-[var(--accent-bg)] active:enabled:scale-[.98] disabled:opacity-50",
   button: "flex min-h-10 min-w-0 items-center justify-center gap-1.5 rounded-[10px] px-3 py-1.5 text-[13px] font-semibold leading-normal transition duration-150 active:enabled:scale-[.98] disabled:opacity-[.48]",
   iconButton: "grid size-10 shrink-0 place-items-center rounded-[10px] p-2 text-[var(--muted)] transition-colors duration-150 hover:bg-[var(--inset)] hover:text-[var(--text)]",
   buttonGroup: "gap-2",

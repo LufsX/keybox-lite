@@ -7,17 +7,19 @@
   let open = $state(false)
   let secondaryOpen = $state(false)
   let disabled = $state(false)
+  let busy = $state(false)
   let reducedMotion = $state(false)
   let selected = $state("two")
   const options = Array.from({ length: 12 }, (_, i) => ({ value: i === 1 ? "two" : String(i), label: "Option " + i }))
 
-  export function configure(state: { open?: boolean; secondaryOpen?: boolean; disabled?: boolean; reducedMotion?: boolean; mounted?: boolean; visible?: boolean }) {
+  export function configure(state: { open?: boolean; secondaryOpen?: boolean; disabled?: boolean; reducedMotion?: boolean; mounted?: boolean; visible?: boolean; busy?: boolean }) {
     if (state.open !== undefined) open = state.open
     if (state.secondaryOpen !== undefined) secondaryOpen = state.secondaryOpen
     if (state.disabled !== undefined) disabled = state.disabled
     if (state.reducedMotion !== undefined) reducedMotion = state.reducedMotion
     if (state.mounted !== undefined) mounted = state.mounted
     if (state.visible !== undefined) visible = state.visible
+    if (state.busy !== undefined) busy = state.busy
   }
 </script>
 
@@ -41,7 +43,7 @@
       <button type="button" data-outside style="position: fixed; z-index: 50; inset: 180px 0 0; background: var(--inset);">Adjacent surface</button>
     </div>
   {:else}
-    <Modal title="Dropdown test" onclose={() => visible = false}>
+    <Modal title="Dropdown test" {busy} onclose={() => visible = false}>
       <div style="height: 160px">Scrollable content</div>
       {@render dropdowns()}
       <button type="button" data-outside>Outside menu</button>

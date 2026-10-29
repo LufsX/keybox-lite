@@ -353,6 +353,46 @@ try {
     await page.locator("dialog").waitFor({ state: "detached" })
     await assertClean(0)
 
+    // Back dismisses a dialog without changing its page; click-close removes
+    // its history entry so the next Back reaches the previous page directly.
+    await load()
+    const homeURL = page.url()
+    await page.evaluate(() => history.back())
+    await page.locator("dialog").waitFor({ state: "detached" })
+    assert.equal(page.url(), homeURL)
+    await page.evaluate(() => history.pushState({ route: "targets" }, "", "#/targets"))
+    const targetsURL = page.url()
+    await configure({ visible: true, busy: true })
+    const busyState = await page.evaluate(() => JSON.stringify(history.state))
+    await page.evaluate(() => history.back())
+    await page.waitForFunction(expected => JSON.stringify(history.state) === expected, busyState)
+    assert.equal(await page.locator("dialog[open]").count(), 1, "busy dialogs must consume Back")
+    assert.equal(page.url(), targetsURL)
+    await configure({ busy: false })
+    await page.evaluate(() => history.back())
+    await page.locator("dialog").waitFor({ state: "detached" })
+    assert.equal(page.url(), targetsURL)
+
+    await configure({ visible: true })
+    await page.getByRole("button", { name: "Close", exact: true }).click()
+    await page.locator("dialog").waitFor({ state: "detached" })
+    await page.waitForFunction(() => history.state?.route === "targets" && !history.state?.__keyboxLiteModal)
+    await page.evaluate(() => history.back())
+    await page.waitForFunction(url => location.href === url, homeURL)
+
+    await configure({ visible: true })
+    const previousModal = await page.evaluate(() => history.state.__keyboxLiteModal)
+    await page.evaluate(() => {
+      window.flushSync(() => window.harness.configure({ visible: false }))
+      window.flushSync(() => window.harness.configure({ visible: true }))
+    })
+    await page.waitForFunction(previous => history.state?.__keyboxLiteModal && history.state.__keyboxLiteModal !== previous, previousModal)
+    assert.equal(await page.locator("dialog[open]").count(), 1, "replacement dialog must survive pending history cleanup")
+    await page.evaluate(() => history.back())
+    await page.locator("dialog").waitFor({ state: "detached" })
+    assert.equal(page.url(), homeURL)
+    await assertClean(0)
+
     // Fallback overflow is shared while one menu exits and another opens.
     await load("?multiple")
     await configure({ open: true })
