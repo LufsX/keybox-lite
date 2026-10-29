@@ -132,6 +132,10 @@ func tlv(b []byte, p int) (tag byte, val []byte, next int, ok bool) {
 	return tag, b[p:next], next, true
 }
 
+// RFC 5280 limits certificate serial numbers to 20 octets. A DER sign-padding
+// byte is excluded so existing unsigned 160-bit serials remain readable.
+const maxSerialBytes = 20
+
 // serialOf walks Certificate -> tbsCertificate -> serialNumber.
 func serialOf(der []byte) ([]byte, bool) {
 	// Certificate SEQUENCE
@@ -167,6 +171,9 @@ func serialOf(der []byte) ([]byte, bool) {
 			return nil, false
 		}
 		val = val[1:]
+	}
+	if len(val) > maxSerialBytes {
+		return nil, false
 	}
 	return val, true
 }
