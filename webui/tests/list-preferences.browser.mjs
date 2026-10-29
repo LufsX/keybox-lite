@@ -101,6 +101,7 @@ try {
   assert.equal((await page.locator(".target-search > div").boundingBox()).y, firstSearch.y, "first pull keeps the search in place")
   assert.equal((await page.locator('[data-skeleton="backend"]').boundingBox()).y, firstBanner.y, "first pull keeps the banner in place")
   await firstTouch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] })
+  const firstTouchEndedAt = Date.now()
   await firstTouch.detach()
   await page.evaluate(() => {
     sessionStorage.setItem("initial-pull-tested", "1")
@@ -120,10 +121,13 @@ try {
   await search.fill("")
   await rows(["alpha", "zulu"])
   const alphaToggle = page.locator('[data-virtual-key="com.alpha"] input[type="checkbox"]')
-  await alphaToggle.click()
+  // A claimed pull suppresses clicks for 600 ms after touchend; row text can be ready sooner.
+  await page.waitForTimeout(Math.max(0, 600 - (Date.now() - firstTouchEndedAt)))
+  await alphaToggle.check()
   await rows(["alpha", "zulu"])
-  await alphaToggle.click()
+  await alphaToggle.uncheck()
   await rows(["alpha", "zulu"])
+  await page.locator(".target-fab-dot").waitFor({ state: "detached" })
   assert.equal(await page.evaluate(() => window.nameComparisons), comparisons, "query and selection do not re-run the ordering comparator")
   await page.locator("#targets-menu-trigger").click()
   const system = page.getByRole("menuitemcheckbox", { name: "显示系统应用", exact: true })
@@ -237,15 +241,27 @@ try {
   await page.locator("#targets-menu-trigger").click()
   const movingRow = page.locator('[data-virtual-key="com.zulu"]')
   const oldTop = (await movingRow.boundingBox()).y
+  // Sample the real motion at creation so browser scheduling cannot skip its midpoint.
+  await movingRow.evaluate(node => {
+    const animate = node.animate
+    node.animate = (...args) => {
+      node.animate = animate
+      const animation = animate.apply(node, args)
+      animation.currentTime = Number(animation.effect.getTiming().duration) / 2
+      window.sortMiddleTop = node.getBoundingClientRect().top
+      animation.currentTime = 0
+      return animation
+    }
+  })
   await sort("最近安装")
   await page.waitForTimeout(120)
   await rows(["Zulu", "Alpha"])
   assert.ok((await sortTrigger.innerText()).includes("包名"), "selection stays on the applied sort while dates load")
   await page.waitForFunction(() => document.querySelector('button[aria-label="排序"]').textContent.includes("最近安装"))
-  await page.waitForTimeout(45)
-  const middleTop = (await movingRow.boundingBox()).y
+  await page.waitForFunction(() => typeof window.sortMiddleTop === "number")
+  const middleTop = await page.evaluate(() => window.sortMiddleTop)
   await rows(["Alpha", "Zulu"])
-  await page.waitForTimeout(300)
+  await movingRow.evaluate(node => Promise.all(node.getAnimations().map(animation => animation.finished.catch(() => {}))))
   const finalTop = (await movingRow.boundingBox()).y
   assert.ok(middleTop < oldTop - 1 && middleTop > finalTop + 1, "ready install order moves rows smoothly")
 
