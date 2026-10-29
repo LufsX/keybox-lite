@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -108,6 +109,37 @@ func (e *engine) tick(ctx context.Context, c config) error {
 	c.last = e.d.now().Unix()
 	return e.writeConfig(c)
 }
+func clearStateData(path string, keep func(string) bool) error {
+	st, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() {
+		return os.Remove(path)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	retained := false
+	for _, entry := range entries {
+		if keep(entry.Name()) {
+			retained = true
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(path, entry.Name())); err != nil {
+			return err
+		}
+	}
+	if retained {
+		return nil
+	}
+	return os.Remove(path)
+}
+
 func (e *engine) uninstall(ctx context.Context) error {
 	if err := e.init(); err != nil {
 		return err
@@ -128,7 +160,7 @@ func (e *engine) uninstall(ctx context.Context) error {
 			locks[i].Close()
 		}
 	}()
-	for _, name := range []string{"action.lock", "scheduler.lock", "maintenance.lock", "config.lock"} {
+	for _, name := range []string{"action.lock", "scheduler.lock", "maintenance.lock", "config.lock", "files.lock"} {
 		f, err := lock(ctx, filepath.Join(e.p.state, name), 24*time.Hour)
 		if err != nil {
 			return err
@@ -143,12 +175,23 @@ func (e *engine) uninstall(ctx context.Context) error {
 			return err
 		}
 	}
-	// Application data must not survive an uninstall. The stopping marker and the
-	// lock inodes stay: late writers are blocked by the marker and still contend
-	// on the same lock files until the root manager deletes the module.
+	// Keep lock inodes in both layouts, including those opened by old waiters.
+	for _, data := range []struct {
+		name string
+		keep func(string) bool
+	}{
+		{"targets", func(name string) bool { return name == "lock" }},
+		{"keybox-files", func(name string) bool { return name == "files.lock" }},
+		{"status-cache", func(name string) bool {
+			return name == "locks" || strings.HasSuffix(name, ".lock") && filesID(strings.TrimSuffix(name, ".lock"))
+		}},
+	} {
+		if err := clearStateData(filepath.Join(e.p.state, data.name), data.keep); err != nil {
+			return err
+		}
+	}
+	// Keep the uninstall marker until the root manager deletes the module.
 	for _, p := range []string{
-		filepath.Join(e.p.state, "targets"),
-		filepath.Join(e.p.state, "status-cache"),
 		filepath.Join(e.p.state, "scheduler.pid"),
 		filepath.Join(e.p.state, "maintenance.pid"),
 	} {

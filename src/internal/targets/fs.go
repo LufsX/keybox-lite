@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"keyboxlite/internal/lockfile"
 )
 
 type disk struct {
@@ -248,29 +250,16 @@ func (d *disk) write(p string, want snapshot) error {
 	return staged.commit()
 }
 func (d *disk) lock() (*os.File, error) {
-	dir, n, err := d.parent(stateDir+"/lock", true, 0700)
+	dir, _, err := d.parent("/data/adb/keybox-lite/.lock-parent", true, 0700)
 	if err != nil {
 		return nil, err
 	}
 	defer dir.Close()
-	if err = dir.Chmod(0700); err != nil {
-		return nil, err
-	}
-	fd, err := syscall.Openat(int(dir.Fd()), n, syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0600)
+	f, err := lockfile.OpenAt(dir, "targets.lock")
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), "targets lock")
-	st, err := f.Stat()
-	if err == nil && (!st.Mode().IsRegular() || st.Sys().(*syscall.Stat_t).Nlink != 1) {
-		err = fmt.Errorf("invalid lock file")
-	}
-	if err == nil {
-		err = f.Chmod(0600)
-	}
-	if err == nil {
-		err = syscall.Flock(fd, syscall.LOCK_EX)
-	}
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
 	if err != nil {
 		f.Close()
 		return nil, err

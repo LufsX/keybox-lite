@@ -145,6 +145,26 @@ func TestRuntimeMaintenanceCancellationAndBudget(t *testing.T) {
 func TestRuntimeUninstallStopsMaintenanceBeforeCleanup(t *testing.T) {
 	e := fixture(t)
 	e.out = io.Discard
+	if err := os.MkdirAll(e.p.state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.p.state, "config.lock"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	oldLocks := map[string]os.FileInfo{}
+	for _, relative := range []string{"targets/lock", "keybox-files/files.lock", "status-cache/" + strings.Repeat("a", 64) + ".lock"} {
+		path := filepath.Join(e.p.state, relative)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		oldLocks[path], _ = os.Stat(path)
+		if err := os.WriteFile(filepath.Join(filepath.Dir(path), "payload"), []byte("temporary data"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var boots, cleanups atomic.Int32
@@ -199,5 +219,18 @@ func TestRuntimeUninstallStopsMaintenanceBeforeCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(e.p.state, "maintenance.lock")); err != nil {
 		t.Fatal("lock inode removed")
+	}
+	for path, before := range oldLocks {
+		after, err := os.Stat(path)
+		if err != nil || !os.SameFile(before, after) {
+			t.Fatal("legacy lock inode removed", path, err)
+		}
+		if exists(filepath.Join(filepath.Dir(path), "payload")) {
+			t.Fatal("private data survived uninstall")
+		}
+	}
+	if store, err := e.filesStore(context.Background()); err == nil {
+		store.close()
+		t.Fatal("upload storage reopened after uninstall")
 	}
 }

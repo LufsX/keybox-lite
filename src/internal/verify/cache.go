@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"keyboxlite/internal/lockfile"
 	"keyboxlite/internal/status"
 	"keyboxlite/internal/termfmt"
 )
@@ -266,12 +267,18 @@ func fetchStatus(ctx context.Context, workdir, accel string) (statusDownload, bo
 	}
 	defer dir.Close()
 	key := cacheName(accel)
-	lock, err := openCacheFile(dir, key+".lock", syscall.O_CREAT|syscall.O_RDWR)
+	lockCtx, cancel := context.WithTimeout(ctx, cacheLockTimeout)
+	defer cancel()
+	lock, err := lockfile.OpenCacheContext(lockCtx, dir, key)
 	if err != nil {
+		if lockCtx.Err() != nil {
+			termfmt.Printf("[FAIL] status cache lock: %v\n", lockCtx.Err())
+			return statusDownload{}, false
+		}
 		return withoutCache("lock file", err)
 	}
 	defer lock.Close()
-	if err := waitCacheLock(ctx, lock); err != nil {
+	if err := waitCacheLock(lockCtx, lock); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			termfmt.Printf("[FAIL] status cache lock: %v\n", err)
 			return statusDownload{}, false

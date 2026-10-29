@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -144,8 +143,9 @@ func TestCachePrivatePermissions(t *testing.T) {
 	if _, ok := fetchStatus(context.Background(), dir, " "); !ok {
 		t.Fatal("fetch failed")
 	}
+	lock := cacheLockPath(t)
 	for path, want := range map[string]os.FileMode{
-		cachePath(): 0700, file: 0600, strings.TrimSuffix(file, ".json") + ".lock": 0600,
+		cachePath(): 0700, file: 0600, filepath.Dir(lock): 0700, lock: 0600,
 	} {
 		info, err := os.Lstat(path)
 		if err != nil || info.Mode().Perm() != want {

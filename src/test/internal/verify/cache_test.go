@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"keyboxlite/internal/lockfile"
 )
 
 // Both helpers run only in subprocesses and never access the network.
@@ -72,6 +74,25 @@ func cacheFixture(t *testing.T) (string, string) {
 	t.Setenv("VERIFY_CACHE_NETWORK", "1")
 	t.Setenv("VERIFY_CACHE_MODE", "live")
 	return dir, filepath.Join(dir, "cache", cacheName(" ")+".json")
+}
+
+func cacheLockPath(t *testing.T) string {
+	t.Helper()
+	dir, err := openCacheDir(cachePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	lock, err := lockfile.OpenCache(dir, cacheName(" "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	relative, err := filepath.Rel(dir.Name(), lock.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(cachePath(), relative)
 }
 
 func requestCount(t *testing.T) int {
@@ -306,7 +327,7 @@ func TestCacheRejectsUnsafePaths(t *testing.T) {
 				t.Fatal("initial fetch failed")
 			}
 			cache := os.Getenv("KB_STATUS_CACHE")
-			lock := strings.TrimSuffix(file, ".json") + ".lock"
+			lock := cacheLockPath(t)
 			target := filepath.Join(dir, "protected")
 			if err := os.WriteFile(target, []byte("untouched"), 0600); err != nil {
 				t.Fatal(err)
@@ -392,7 +413,7 @@ func TestCacheLockCancellationAndRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cache.Close()
-	lock, err := openCacheFile(cache, cacheName(" ")+".lock", syscall.O_CREAT|syscall.O_RDWR)
+	lock, err := lockfile.OpenCache(cache, cacheName(" "))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +473,7 @@ func TestCacheCanceledDownloadCleansUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".lock") {
+		if entry.Name() != "locks" || !entry.IsDir() {
 			t.Fatalf("cache temp leaked: %s", entry.Name())
 		}
 	}

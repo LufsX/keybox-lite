@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"keyboxlite/internal/lockfile"
 	"keyboxlite/internal/termfmt"
 )
 
@@ -51,7 +52,7 @@ func run(script, state string, budget, pulse time.Duration) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	lock, err := os.OpenFile(filepath.Join(state, "update-control.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := lockfile.Open(state, "update-control.lock")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2

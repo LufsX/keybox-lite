@@ -121,7 +121,10 @@ func TestRuntimeUninstallRemovesState(t *testing.T) {
 	if err := e.init(); err != nil {
 		t.Fatal(err)
 	}
-	stale := []string{"status-cache", "scheduler.pid", "maintenance.pid", "targets/state.json", "targets/lock", "targets/transaction.json"}
+	stale := []string{"status-cache", "scheduler.pid", "maintenance.pid", "targets/state.json", "targets/transaction.json"}
+	oldLock := filepath.Join(e.p.state, "targets", "lock")
+	mustWrite(t, oldLock, nil)
+	before, _ := os.Stat(oldLock)
 	for _, name := range stale {
 		mustWrite(t, filepath.Join(e.p.state, name), []byte("stale"))
 	}
@@ -132,6 +135,10 @@ func TestRuntimeUninstallRemovesState(t *testing.T) {
 		if exists(filepath.Join(e.p.state, name)) {
 			t.Fatalf("uninstall left state/%s", name)
 		}
+	}
+	after, err := os.Stat(oldLock)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatal("uninstall removed legacy target lock inode")
 	}
 	// The late-writer guard files must survive for the root manager.
 	if !exists(filepath.Join(e.p.state, "stopping")) {

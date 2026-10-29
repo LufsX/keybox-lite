@@ -28,6 +28,8 @@ func main() {
 		usage()
 	}
 	switch os.Args[1] {
+	case "keybox-files":
+		os.Exit(runtime.Files(os.Args[2:]))
 	case "open-webui":
 		os.Exit(webentry.Run(os.Args[2:]))
 	case "targets":
@@ -158,7 +160,7 @@ func read(args []string, n int, msg string) ([]byte, error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: keyboxlite open-webui|targets|update|settings|service|maintenance|uninstall|run-update|cancel-update|backend|prepare|decode-meow|decode-spectre|decode-addon|spectre-url|spectre-urls|serials|check|info|verify ...")
+	fmt.Fprintln(os.Stderr, "usage: keyboxlite open-webui|targets|keybox-files|update|settings|service|maintenance|uninstall|run-update|cancel-update|backend|prepare|decode-meow|decode-spectre|decode-addon|spectre-url|spectre-urls|serials|check|info|verify ...")
 	os.Exit(2)
 }
 

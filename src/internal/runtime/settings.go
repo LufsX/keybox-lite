@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"keyboxlite/internal/lockfile"
 )
 
 type config struct {
@@ -122,16 +124,16 @@ func lock(ctx context.Context, path string, wait time.Duration) (*os.File, error
 	if err := safePath(path, false); err != nil {
 		return nil, err
 	}
-	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0600)
+	if wait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wait)
+		defer cancel()
+	}
+	f, err := lockfile.OpenContext(ctx, filepath.Dir(path), filepath.Base(path))
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), path)
-	var st syscall.Stat_t
-	if err = syscall.Fstat(fd, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFREG {
-		f.Close()
-		return nil, fmt.Errorf("unsafe lock")
-	}
+	fd := int(f.Fd())
 	end := time.Now().Add(wait)
 	for {
 		err = syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
