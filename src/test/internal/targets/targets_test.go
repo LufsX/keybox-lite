@@ -71,6 +71,23 @@ func absent(t *testing.T, root, p string) {
 		t.Fatalf("%s exists: %v", p, err)
 	}
 }
+func TestConfigOnlyStatusRetainsRevisionWithoutListingPackages(t *testing.T) {
+	m, root := fixture(t, false)
+	put(t, root, configPath, "[target]\ncom.user!\n")
+	calls, list := 0, m.list
+	m.list = func() (map[string]bool, error) { calls++; return list() }
+	config, err := m.statusWithPackages(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 || len(config.Packages) != 0 || len(config.Config.Targets) != 1 {
+		t.Fatalf("config status enumerated applications: calls=%d, status=%+v", calls, config)
+	}
+	full := getStatus(t, m)
+	if calls != 1 || len(full.Packages) == 0 || full.Revision != config.Revision {
+		t.Fatalf("package listing changed the configuration revision: calls=%d", calls)
+	}
+}
 func TestModernRoundTripPreservesUnknownAndEditablePolicies(t *testing.T) {
 	m, root := fixture(t, false)
 	raw := "# header\n[android]\nos_patch = 202601\ncustom = android-value\n[target]\ncom.a\ncom.b!\nuid:10042?\ncom.user@10!\nandroid\n[default_policy]\nos_patch = prop\nvendor_patch = 20260228\nunknown = retain\n[com.b]\nboot_patch = no\nfuture = yes\n[future_feature]\nos_patch = future-syntax\nflag = unchanged\n"

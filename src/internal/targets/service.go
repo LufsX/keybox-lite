@@ -335,8 +335,11 @@ func packageEntries(c Config, tracked []string, installed map[string]bool) []Pac
 	return out
 }
 func (m *manager) status() (Status, error) {
+	return m.statusWithPackages(true)
+}
+func (m *manager) statusWithPackages(packages bool) (Status, error) {
 	var s Status
-	err := m.locked(func() error { l, e := m.load(true); s = l.status; return e })
+	err := m.locked(func() error { l, e := m.load(packages); s = l.status; return e })
 	return s, err
 }
 func (m *manager) save(r SaveRequest) error {

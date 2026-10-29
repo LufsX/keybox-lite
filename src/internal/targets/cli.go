@@ -10,13 +10,19 @@ import (
 func Run(args []string) int { return run(args, os.Stdin, os.Stdout, os.Stderr) }
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	root, module := "/", ""
+	configOnly := false
 	pos := []string{}
 	bad := func() int {
-		fmt.Fprintln(stderr, "usage: targets [--root <sysroot>] [--module-dir <device module path>] status|packages|save|auto|entry status|set on|off|apply|remove")
+		fmt.Fprintln(stderr, "usage: targets [--root <sysroot>] [--module-dir <device module path>] status [--config-only]|packages|save|auto|entry status|set on|off|apply|remove")
 		return 2
 	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--config-only":
+			if configOnly {
+				return bad()
+			}
+			configOnly = true
 		case "--root", "--module-dir":
 			flag := args[i]
 			i++
@@ -36,6 +42,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return bad()
 	}
 	command := pos[0]
+	if configOnly && command != "status" {
+		return bad()
+	}
 	if command == "entry" {
 		if !(len(pos) == 2 && (pos[1] == "status" || pos[1] == "apply" || pos[1] == "remove")) && !(len(pos) == 3 && pos[1] == "set" && (pos[2] == "on" || pos[2] == "off")) {
 			return bad()
@@ -55,8 +64,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch command {
 	case "status", "packages":
 		var s Status
-		s, err = m.status()
+		s, err = m.statusWithPackages(!configOnly)
 		if command == "packages" {
+			if err == nil && s.PackagesError != "" {
+				err = fmt.Errorf("%s", s.PackagesError)
+			}
 			result = s.Packages
 		} else {
 			result = s
