@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Terminal } from "lucide-svelte"
+  import { ArrowDown, Terminal } from "lucide-svelte"
   import { fade } from "svelte/transition"
   import { surface } from "../motion"
   import type { LogLine, LogTone } from "../log"
@@ -14,6 +14,7 @@
     currentLabel: string
     savedLabel: string
     loadingLabel: string
+    bottomLabel?: string
     saved: boolean
     loading: boolean
     disabled?: boolean
@@ -22,11 +23,14 @@
   }
 
   let { output, lines, title, hint, currentLabel, savedLabel, loadingLabel,
-    saved, loading, disabled = false, onCurrent, onSaved }: Props = $props()
+    bottomLabel = "Back to bottom", saved, loading, disabled = false, onCurrent, onSaved }: Props = $props()
   const id = $props.id()
   let contentHeight = $state(34)
   let currentBody: HTMLElement | undefined
   const scrollPositions = [0, 0]
+  let followingCurrent = $state(true)
+  let currentOverflow = $state(false)
+  let resumeCurrent: (() => void) | undefined
   let indicatorReady = $state(false)
   let indicator = $state({ x: 2, y: 2, width: 0, height: 28 })
 
@@ -54,31 +58,93 @@
 
   function measureBody(node: HTMLElement, options: { view: boolean; content: string }) {
     const view = options.view
-    currentBody = node
-    const resize = () => {
-      if (currentBody === node && node.isConnected) contentHeight = node.getBoundingClientRect().height
+    const index = view ? 1 : 0
+    let frame = 0
+    let ready = false
+    let destroyed = false
+    let appliedTop = 0
+    let appliedWidth = 0
+    let appliedHeight = 0
+    const active = () => currentBody === node && view === saved && !node.inert && node.isConnected
+    const bottom = () => Math.max(0, node.scrollHeight - node.clientHeight)
+    const scroll = () => {
+      if (!ready || node.clientWidth !== appliedWidth || node.clientHeight !== appliedHeight) return
+      const top = Math.max(0, node.scrollTop)
+      // Ignore our own writes and browser clamping after a layout/content change.
+      if (Math.abs(top - Math.min(appliedTop, bottom())) <= 0.5) return
+      appliedTop = top
+      scrollPositions[index] = top
+      if (!view) {
+        followingCurrent = bottom() - top <= 2
+        currentOverflow = bottom() > 2
+      }
     }
-    const scroll = () => { scrollPositions[view ? 1 : 0] = node.scrollTop }
+    const layout = () => {
+      if (!active()) return
+      scroll()
+      contentHeight = node.getBoundingClientRect().height
+      node.scrollTop = !view && followingCurrent ? bottom() : scrollPositions[index]
+      appliedTop = node.scrollTop
+      appliedWidth = node.clientWidth
+      appliedHeight = node.clientHeight
+      scrollPositions[index] = appliedTop
+      if (!view) currentOverflow = bottom() > 2
+      ready = true
+    }
+    const schedule = () => {
+      if (!frame && !destroyed) frame = requestAnimationFrame(() => { frame = 0; layout() })
+    }
+    const refresh = () => {
+      queueMicrotask(() => { if (!destroyed) { layout(); schedule() } })
+    }
+    const resume = () => {
+      if (!active()) return
+      scroll()
+      followingCurrent = true
+      layout()
+    }
     const activate = () => {
+      if (view !== saved) return
       currentBody = node
       node.id = id
       node.removeAttribute("aria-hidden")
       node.inert = false
-      resize()
-      node.scrollTop = scrollPositions[view ? 1 : 0]
+      if (!view) resumeCurrent = resume
+      refresh()
+    }
+    const deactivate = () => {
+      scroll()
+      ready = false
+      cancelAnimationFrame(frame)
+      frame = 0
+    }
+    const update = (next: { view: boolean; content: string }) => {
+      if (view !== saved) return
+      if (!view && !next.content) {
+        followingCurrent = true
+        scrollPositions[0] = 0
+      }
+      refresh()
     }
     node.addEventListener("introstart", activate)
-    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(resize)
+    node.addEventListener("outrostart", deactivate)
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(schedule)
     observer?.observe(node)
-    if (!observer) window.addEventListener("resize", resize)
-    node.addEventListener("scroll", scroll, { passive: true })
-    queueMicrotask(() => { if (currentBody === node) { resize(); node.scrollTop = scrollPositions[view ? 1 : 0] } })
-    return { update() { queueMicrotask(resize) }, destroy() {
+    if (!observer) window.addEventListener("resize", schedule)
+    const onScroll = () => { if (active()) scroll() }
+    node.addEventListener("scroll", onScroll, { passive: true })
+    activate()
+    update(options)
+    return { update, destroy() {
+      destroyed = true
+      cancelAnimationFrame(frame)
       observer?.disconnect()
-      if (!observer) window.removeEventListener("resize", resize)
-      node.removeEventListener("scroll", scroll)
+      if (!observer) window.removeEventListener("resize", schedule)
+      node.removeEventListener("scroll", onScroll)
       node.removeEventListener("introstart", activate)
+      node.removeEventListener("outrostart", deactivate)
       if (currentBody === node) currentBody = undefined
+      if (resumeCurrent === resume) resumeCurrent = undefined
     } }
   }
   function leave(node: HTMLElement) {
@@ -118,6 +184,11 @@
         class="log-body m-0 max-h-[300px] w-full overflow-y-auto whitespace-pre-wrap p-2 font-mono text-[11px] leading-normal text-[var(--text)] [overflow-wrap:anywhere]"
         in:surface={{ y: 3, scale: 1, duration: 200 }} out:leave>{#if output}{#each lines as line (line)}{#each line.parts as part}<span class={part.tone ? toneClasses[part.tone] : undefined}>{part.text}</span>{/each}{/each}{:else}{hint}{/if}</pre>
     {/key}
+    {#if !saved && !followingCurrent && currentOverflow}
+      <button type="button" class="log-bottom glass-control" aria-controls={id} onclick={() => resumeCurrent?.()}>
+        <ArrowDown size={12} class="shrink-0" aria-hidden="true" />{bottomLabel}
+      </button>
+    {/if}
   </div>
 </section>
 
@@ -130,6 +201,7 @@
   .log-views button:disabled { cursor: default; }
   .log-views button.is-disabled { opacity: .5; }
   .log-content { position: relative; overflow: hidden; border-radius: 8px; background: var(--glass-inset, var(--inset)); box-shadow: var(--glass-inset-shadow, none); transition: height 260ms cubic-bezier(.22, 1, .36, 1); }
-  .log-body { position: absolute; inset: 0 0 auto; }
+  .log-body { position: absolute; inset: 0 0 auto; overflow-anchor: none; }
+  .log-bottom { position: absolute; z-index: 1; inset-inline-end: 6px; bottom: 6px; display: inline-flex; align-items: center; gap: 4px; max-width: calc(100% - 12px); padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--glass-control, var(--panel)); box-shadow: var(--glass-inset-shadow, none); font-size: 11px; line-height: 1.5; color: var(--accent); overflow-wrap: anywhere; }
   @media (prefers-reduced-motion: reduce) { .log-content, .log-views button, .log-view-indicator.is-ready { transition: none; } }
 </style>

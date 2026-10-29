@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setImmediate, setTimeout as delay } from "node:timers/promises"
 import { createRequire } from "node:module"
+import { getEventListeners } from "node:events"
 import { spawnSync } from "node:child_process"
 import { test } from "node:test"
 import { createContext, runInContext } from "node:vm"
@@ -13,8 +14,8 @@ const require = createRequire(import.meta.url)
 const sdkSource = readFileSync(require.resolve("kernelsu"), "utf8")
 const bridgeSource = readFileSync(new URL("../src/lib/bridge.ts", import.meta.url), "utf8")
 
-function harness(t, start) {
-  t.mock.timers.enable({ apis: ["setTimeout"] })
+function harness(t, start, { document } = {}) {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
   const timers = new Set()
   const calls = []
   const listenerErrors = []
@@ -30,6 +31,8 @@ function harness(t, start) {
   }
   const context = createContext({
     window: host,
+    ...(document ? { document } : {}),
+    Date,
     AbortController,
     ksu: host.ksu,
     Error,
@@ -68,6 +71,56 @@ function harness(t, start) {
     sdk, exec: bridge.exec, execUpdate: bridge.execUpdate, host, calls, timers, listenerErrors,
     callbacks: () => Object.keys(host).filter((name) => name !== "ksu"),
   }
+}
+
+function visibilityDocument(visibilityState = "visible") {
+  const listeners = new Set()
+  return {
+    visibilityState, listeners,
+    addEventListener(type, listener) {
+      assert.equal(type, "visibilitychange")
+      listeners.add(listener)
+    },
+    removeEventListener(type, listener) {
+      assert.equal(type, "visibilitychange")
+      listeners.delete(listener)
+    },
+    change(state) {
+      this.visibilityState = state
+      for (const listener of [...listeners]) listener()
+    },
+  }
+}
+
+function reply(child, ...lines) {
+  for (const line of lines) child.stdout.emit("data", line)
+  child.emit("exit", 0)
+}
+
+function monitorHarness(t, { document, read, stop, launch } = {}) {
+  const reads = []
+  let launches = 0
+  const h = harness(t, (child, command) => {
+    if (command.includes("mktemp")) {
+      if (launch) launch(child)
+      else reply(child, "/data/local/tmp/keybox-webui.testing" + ++launches)
+    } else if (command.includes("tail -c")) {
+      reads.push({ child, command })
+      read?.(child, reads.length, command)
+    } else if (command.includes("read pid start") && stop) {
+      stop(child)
+    } else {
+      reply(child)
+    }
+  }, { document })
+  return { ...h, reads }
+}
+
+function assertMonitorClean(h, document, signal) {
+  assert.equal(h.timers.size, 0)
+  assert.deepEqual(h.callbacks(), [])
+  if (document) assert.equal(document.listeners.size, 0)
+  assert.equal(getEventListeners(signal, "abort").length, 0)
 }
 
 test("missing or unsupported native spawn resolves immediately without resources", async (t) => {
@@ -208,7 +261,8 @@ test("a throwing output listener cannot prevent exit or cleanup", async (t) => {
   assert.deepEqual(h.callbacks(), [])
 })
 
-test("early stop waits for readiness and bounded polling reports status safely", async (t) => {
+test("hidden monitor keeps early stop readiness retries at 100ms", async (t) => {
+  const document = visibilityDocument("hidden")
   let stopAttempts = 0
   let completed = false
   const h = harness(t, (child, command) => {
@@ -221,7 +275,7 @@ test("early stop waits for readiness and bounded polling reports status safely",
       child.stdout.emit("data", completed ? "final log" : "first log")
     }
     child.emit("exit", 0)
-  })
+  }, { document })
   const controller = new AbortController()
   let stop
   const output = []
@@ -235,11 +289,355 @@ test("early stop waits for readiness and bounded polling reports status safely",
   await setImmediate()
   assert.equal((await stopping).errno, 0)
   assert.equal(stopAttempts, 2)
-  t.mock.timers.tick(500)
-  await setImmediate()
+  assert.equal(h.calls.filter(({ args }) => args[0].includes("tail -c")).length, 1)
+  document.change("visible")
   assert.equal((await pending).errno, 130)
   assert.equal(output.at(-1), "final log\n")
-  assert.equal(h.timers.size, 0)
+  assertMonitorClean(h, document, controller.signal)
+})
+
+test("unchanged log is published once while completion and invalid statuses are still processed", async (t) => {
+  for (const status of ["0", "130", "oops", "256"]) {
+    await t.test(status, async (t) => {
+      const document = visibilityDocument()
+      const h = monitorHarness(t, {
+        document,
+        read: (child, count) => reply(child, count < 3 ? "RUNNING" : status, "same log"),
+      })
+      const controller = new AbortController()
+      const output = []
+      const pending = h.execUpdate("synthetic-update", (text) => output.push(text), 60_000, controller.signal, () => {})
+      await setImmediate()
+      t.mock.timers.tick(500)
+      await setImmediate()
+      assert.equal(h.reads.length, 2)
+      assert.deepEqual(output, ["same log\n"])
+      t.mock.timers.tick(500)
+      const result = await pending
+      if (status === "0" || status === "130") {
+        assert.equal(result.errno, Number(status))
+        assert.equal(result.stdout, "same log\n")
+        assert.equal(result.failure, undefined)
+      } else {
+        assert.equal(result.failure, "bridge")
+        assert.match(result.stderr, /Invalid update completion status/)
+      }
+      assert.deepEqual(output, ["same log\n"])
+      assertMonitorClean(h, document, controller.signal)
+    })
+  }
+})
+
+test("a polling-shell error cannot be mistaken for the detached operation exit status", async t => {
+  const document = visibilityDocument()
+  const h = monitorHarness(t, {
+    document, read(child) { child.stderr.emit("data", "native polling failed"); child.emit("exit", 1) },
+  })
+  const controller = new AbortController()
+  const result = await h.execUpdate("synthetic-update", () => {}, 60_000, controller.signal, () => {})
+  assert.equal(result.errno, 1)
+  assert.equal(result.failure, "bridge")
+  assert.equal(result.stderr.trim(), "native polling failed")
+  assertMonitorClean(h, document, controller.signal)
+})
+
+test("hidden polling waits 2500ms and becoming visible immediately restores 500ms polling", async (t) => {
+  const document = visibilityDocument("hidden")
+  const h = monitorHarness(t, { document, read: (child) => reply(child, "RUNNING", "log") })
+  const controller = new AbortController()
+  const pending = h.execUpdate("synthetic-update", () => {}, 60_000, controller.signal, () => {})
+  await setImmediate()
+  assert.equal(h.reads.length, 1)
+  assert.equal(document.listeners.size, 1)
+  t.mock.timers.tick(2499)
+  await setImmediate()
+  assert.equal(h.reads.length, 1)
+  t.mock.timers.tick(1)
+  await setImmediate()
+  assert.equal(h.reads.length, 2)
+  t.mock.timers.tick(100)
+  document.change("visible")
+  await setImmediate()
+  assert.equal(h.reads.length, 3)
+  t.mock.timers.tick(499)
+  await setImmediate()
+  assert.equal(h.reads.length, 3)
+  t.mock.timers.tick(1)
+  await setImmediate()
+  assert.equal(h.reads.length, 4)
+  controller.abort()
+  assert.equal((await pending).failure, "bridge")
+  assertMonitorClean(h, document, controller.signal)
+  const calls = h.calls.length
+  document.change("visible")
+  t.mock.timers.tick(60_000)
+  await setImmediate()
+  assert.equal(h.calls.length, calls)
+})
+
+test("visibility wake during a native read is retained, coalesced and cleaned after exit", async (t) => {
+  const document = visibilityDocument("hidden")
+  const h = monitorHarness(t, { document })
+  const controller = new AbortController()
+  const output = []
+  const pending = h.execUpdate("synthetic-update", (text) => output.push(text), 60_000, controller.signal, () => {})
+  await setImmediate()
+  document.change("visible")
+  document.change("hidden")
+  document.change("visible")
+  await setImmediate()
+  assert.equal(h.reads.length, 1, "wake must not start overlapping native jobs")
+  reply(h.reads[0].child, "RUNNING", "same log")
+  await setImmediate()
+  assert.equal(h.reads.length, 2, "wake must survive the in-flight read")
+  assert.equal(h.timers.size, 1, "only the active native read has a timer")
+  reply(h.reads[1].child, "130", "same log")
+  const result = await pending
+  assert.equal(result.errno, 130)
+  assert.deepEqual(output, ["same log\n"])
+  assertMonitorClean(h, document, controller.signal)
+  const calls = h.calls.length
+  document.change("hidden")
+  document.change("visible")
+  h.reads[0].child.stdout.emit("data", "late log")
+  h.reads[1].child.emit("exit", 0)
+  t.mock.timers.tick(60_000)
+  await setImmediate()
+  assert.equal(h.calls.length, calls)
+  assert.deepEqual(output, ["same log\n"])
+})
+
+test("startup abort retains the late directory callback within the original 15s bound", async (t) => {
+  for (const mode of ["late-exit", "timeout-with-path", "timeout-without-path"]) {
+    await t.test(mode, async (t) => {
+      const document = visibilityDocument("hidden")
+      const h = monitorHarness(t, { document, launch() {} })
+      const controller = new AbortController()
+      const output = []
+      let started = false
+      let result
+      const pending = h.execUpdate("synthetic-update", (text) => output.push(text), 60_000, controller.signal, () => { started = true })
+      void pending.then((value) => { result = value })
+      await setImmediate()
+      const { args, child } = h.calls[0]
+      const dir = "/data/local/tmp/keybox-webui.lateLaunch"
+      controller.abort()
+      document.change("visible")
+      await setImmediate()
+      assert.equal(result, undefined, "disposal must still wait for the submitted native launch")
+      assert.equal(h.host[args[3]], child, "native output must retain its named callback")
+      assert.equal(h.timers.size, 1, "startup retains only its bounded exec timer")
+      assert.equal(h.calls.length, 1, "disposal must not signal the detached update")
+      t.mock.timers.tick(14_999)
+      await setImmediate()
+      assert.equal(result, undefined)
+      if (mode === "late-exit") {
+        reply(h.host[args[3]], dir)
+      } else {
+        if (mode === "timeout-with-path") h.host[args[3]].stdout.emit("data", dir)
+        t.mock.timers.tick(1)
+      }
+      assert.equal((await pending).failure, mode === "late-exit" ? "bridge" : "timeout")
+      assert.equal(started, false, "an aborted launch must not expose stop or begin monitoring")
+      assert.equal(h.reads.length, 0)
+      assert.deepEqual(output, [])
+      if (mode === "timeout-without-path") {
+        assert.equal(h.calls.length, 1, "an unknown directory cannot be removed")
+      } else {
+        assert.equal(h.calls.length, 2)
+        assert.equal(h.calls[1].args[0], "(\nrm -rf '" + dir + "'\n)\n")
+      }
+      assertMonitorClean(h, document, controller.signal)
+      const calls = h.calls.length
+      reply(child, dir)
+      document.change("visible")
+      t.mock.timers.tick(60_000)
+      await setImmediate()
+      assert.equal(h.calls.length, calls)
+    })
+  }
+})
+
+test("abort releases an outstanding read immediately, including a queued visibility wake", async (t) => {
+  const document = visibilityDocument("hidden")
+  const h = monitorHarness(t, { document })
+  const controller = new AbortController()
+  const output = []
+  const pending = h.execUpdate("synthetic-update", (text) => output.push(text), 60_000, controller.signal, () => {})
+  await setImmediate()
+  assert.equal(h.callbacks().length, 1)
+  document.change("visible")
+  const child = h.reads[0].child
+  controller.abort()
+  assert.equal((await pending).failure, "bridge")
+  assertMonitorClean(h, document, controller.signal)
+  const calls = h.calls.length
+  reply(child, "0", "late log")
+  document.change("visible")
+  t.mock.timers.tick(60_000)
+  await setImmediate()
+  assert.equal(h.calls.length, calls)
+  assert.deepEqual(output, [])
+})
+
+test("abort immediately releases a stop request or readiness retry and the hidden polling delay", async (t) => {
+  for (const mode of ["request", "retry"]) {
+    await t.test(mode, async (t) => {
+      const document = visibilityDocument("hidden")
+      let stopChild
+      let attempts = 0
+      const h = monitorHarness(t, {
+        document,
+        read: (child) => reply(child, "RUNNING", "log"),
+        stop: (child) => {
+          stopChild = child
+          attempts++
+          if (mode === "retry") reply(child, "STARTING")
+        },
+      })
+      const controller = new AbortController()
+      let stop
+      const pending = h.execUpdate("synthetic-update", () => {}, 60_000, controller.signal, (fn) => { stop = fn })
+      await setImmediate()
+      const stopping = stop()
+      await setImmediate()
+      assert.equal(h.timers.size, 2, "stop and monitor each have one outstanding timer")
+      controller.abort()
+      assert.equal((await pending).failure, "bridge")
+      assert.equal((await stopping).failure, "bridge")
+      assertMonitorClean(h, document, controller.signal)
+      const calls = h.calls.length
+      reply(stopChild)
+      document.change("visible")
+      t.mock.timers.tick(60_000)
+      await setImmediate()
+      assert.equal(h.calls.length, calls)
+      assert.equal(attempts, 1)
+    })
+  }
+})
+
+test("hidden polling respects the remaining deadline and releases its visibility listener", async (t) => {
+  const document = visibilityDocument("hidden")
+  const h = monitorHarness(t, { document, read: (child) => reply(child, "RUNNING", "partial") })
+  const controller = new AbortController()
+  const output = []
+  const pending = h.execUpdate("synthetic-update", (text) => output.push(text), 1200, controller.signal, () => {})
+  await setImmediate()
+  t.mock.timers.tick(1199)
+  await setImmediate()
+  assert.equal(h.reads.length, 1)
+  t.mock.timers.tick(1)
+  const result = await pending
+  assert.equal(result.failure, "timeout")
+  assert.equal(result.stdout, "partial\n")
+  assert.equal(h.reads.length, 2)
+  assert.deepEqual(output, ["partial\n"])
+  assertMonitorClean(h, document, controller.signal)
+})
+
+test("an in-flight read cannot extend the update deadline", async (t) => {
+  const document = visibilityDocument()
+  const h = monitorHarness(t, {
+    document,
+    read: (child, count) => { if (count === 1) reply(child, "RUNNING", "partial") },
+  })
+  const controller = new AbortController()
+  const pending = h.execUpdate("synthetic-update", () => {}, 700, controller.signal, () => {})
+  let result
+  void pending.then((value) => { result = value })
+  await setImmediate()
+  t.mock.timers.tick(500)
+  await setImmediate()
+  assert.equal(h.reads.length, 2)
+  t.mock.timers.tick(199)
+  await setImmediate()
+  assert.equal(result, undefined)
+  document.change("visible")
+  t.mock.timers.tick(1)
+  assert.equal((await pending).failure, "timeout")
+  assertMonitorClean(h, document, controller.signal)
+})
+
+test("monitor completion clears a pending stop readiness retry and prevents later stop commands", async (t) => {
+  const document = visibilityDocument("hidden")
+  const h = monitorHarness(t, {
+    document,
+    read: (child, count) => reply(child, count === 1 ? "RUNNING" : "130", "same log"),
+    stop: (child) => reply(child, "STARTING"),
+  })
+  const controller = new AbortController()
+  let stop
+  const pending = h.execUpdate("synthetic-update", () => {}, 60_000, controller.signal, (fn) => { stop = fn })
+  await setImmediate()
+  const stopping = stop()
+  await setImmediate()
+  assert.equal(h.timers.size, 2, "poll and stop each have an independent delay")
+  document.change("visible")
+  assert.equal((await pending).errno, 130)
+  assert.equal((await stopping).failure, "bridge")
+  assertMonitorClean(h, document, controller.signal)
+  const calls = h.calls.length
+  assert.equal((await stop()).failure, "bridge")
+  t.mock.timers.tick(60_000)
+  await setImmediate()
+  assert.equal(h.calls.length, calls)
+})
+
+test("completion preserves a late native stop acknowledgement for cancellation classification", async (t) => {
+  const document = visibilityDocument("hidden")
+  let stopChild
+  const h = monitorHarness(t, {
+    document,
+    read: (child, count) => reply(child, count === 1 ? "RUNNING" : "130", "same log"),
+    stop: (child) => { stopChild = child },
+  })
+  const controller = new AbortController()
+  let stop
+  let completed = false
+  const pending = h.execUpdate("synthetic-update", () => {}, 60_000, controller.signal, (fn) => { stop = fn })
+  void pending.then(() => { completed = true })
+  await setImmediate()
+  const stopping = stop()
+  await setImmediate()
+  document.change("visible")
+  await setImmediate()
+  assert.equal(h.reads.length, 2)
+  assert.equal(completed, false, "the native stop result must survive update completion")
+  assert.equal(h.callbacks().length, 1)
+  reply(stopChild)
+  assert.equal((await stopping).errno, 0)
+  assert.equal((await pending).errno, 130)
+  assertMonitorClean(h, document, controller.signal)
+})
+
+test("concurrent monitors keep output caches, wake requests and cleanup independent", async (t) => {
+  const document = visibilityDocument("hidden")
+  const h = monitorHarness(t, { document, read: (child) => reply(child, "RUNNING", "same log") })
+  const first = new AbortController()
+  const second = new AbortController()
+  const outputs = [[], []]
+  const one = h.execUpdate("synthetic-one", (text) => outputs[0].push(text), 60_000, first.signal, () => {})
+  const two = h.execUpdate("synthetic-two", (text) => outputs[1].push(text), 60_000, second.signal, () => {})
+  await setImmediate()
+  assert.deepEqual(outputs, [["same log\n"], ["same log\n"]])
+  assert.equal(document.listeners.size, 2)
+  assert.equal(h.reads.length, 2)
+  first.abort()
+  assert.equal((await one).failure, "bridge")
+  assert.equal(document.listeners.size, 1)
+  assert.equal(getEventListeners(first.signal, "abort").length, 0)
+  document.change("visible")
+  await setImmediate()
+  assert.equal(h.reads.length, 3)
+  assert.match(h.reads.at(-1).command, /keybox-webui\.testing2/)
+  t.mock.timers.tick(500)
+  await setImmediate()
+  assert.equal(h.reads.length, 4)
+  assert.deepEqual(outputs, [["same log\n"], ["same log\n"]])
+  second.abort()
+  assert.equal((await two).failure, "bridge")
+  assertMonitorClean(h, document, second.signal)
 })
 
 test("monitor timeout, malformed status and destruction clean polling resources", async (t) => {

@@ -13,7 +13,7 @@ function load(file, deps, globals = {}) {
   return exports
 }
 const sort = load("appSort.ts", { "tiny-pinyin": { default: Pinyin } })
-const { visiblePackages } = load("targets.ts", { "./appSort": sort })
+const { visiblePackages, createTargetPackageDirectory, orderTargetPackages, filterTargetPackages } = load("targets.ts", { "./appSort": sort })
 const names = rows => Array.from(rows, row => row.package_name)
 const packages = [
   { package_name: "com.z", system: false, selected: true, installed: true, mode: "auto" },
@@ -69,6 +69,86 @@ test("explicit system hiding applies to all filters, including selected, tracked
   assert.ok(names(list(undefined, undefined)).includes("com.sys"))
   assert.ok(names(list(undefined, undefined)).includes("com.tracked"))
   assert.equal(names(list(undefined, undefined)).includes("com.hidden"), false)
+})
+
+test("prepared directory survives selection, mode and policy changes and updates missing package membership", () => {
+  const prepare = createTargetPackageDirectory()
+  const config = structuredClone(draft)
+  const directory = prepare(status, config)
+  config.targets = [{ package_name: "com.a", mode: "hack" }]
+  config.system_apps = ["com.sys"]
+  config.default_policy = { os_patch: "prop" }
+  assert.equal(prepare(status, config), directory)
+  const refreshed = { packages: packages.map(item => ({ ...item, selected: !item.selected })) }
+  assert.equal(prepare(refreshed, config), directory, "identical status snapshots and backend selection changes keep the prepared directory")
+  const projected = filterTargetPackages(directory, config, "", "selected", labels, true)
+  assert.deepEqual(names(projected), ["com.a"])
+  assert.equal(projected[0].mode, "hack")
+  config.targets.push({ package_name: "com.missing@10", mode: "generate" }, { package_name: "uid:10042", mode: "hack" })
+  const extended = prepare(status, config)
+  assert.notEqual(extended, directory)
+  assert.equal(extended.length, directory.length + 2)
+  assert.equal(prepare(status, config), extended)
+  config.targets[1].mode = "hack"
+  assert.equal(prepare(status, config), extended)
+  assert.equal(filterTargetPackages(extended, config, "missing", "all")[0].mode, "hack")
+  config.system_apps.push("com.missing@10")
+  const tracked = prepare(status, config)
+  assert.notEqual(tracked, extended)
+  assert.equal(filterTargetPackages(tracked, config, "missing", "all", labels, false).length, 0)
+  config.targets.splice(1, 1)
+  assert.equal(prepare(status, config).some(item => item.package_name === "com.missing@10"), false)
+  assert.notEqual(prepare({ packages: [...packages] }, config), tracked)
+})
+
+test("prepared name order filters and projects draft state without another comparison", () => {
+  let comparisons = 0
+  const h = load("targets.ts", { "./appSort": { compareAppNames(a, b) { comparisons++; return sort.compareAppNames(a, b) } } })
+  const config = structuredClone(draft)
+  const directory = h.createTargetPackageDirectory()(status, config)
+  const ordered = h.orderTargetPackages(directory, labels, "name")
+  assert.ok(comparisons > 0)
+  const preparedComparisons = comparisons
+  for (const query of ["", "ALPHA", "com.", "tracked", "missing", "   ", "not installed"]) {
+    for (const filter of ["listed", "all", "selected", "system", "user"]) {
+      config.targets = query ? [{ package_name: "com.a", mode: "hack" }] : structuredClone(draft.targets)
+      h.filterTargetPackages(ordered, config, query, filter, labels, false)
+      assert.equal(comparisons, preparedComparisons)
+    }
+  }
+  assert.deepEqual(names(h.filterTargetPackages(ordered, config, "", "all", labels, false)), ["com.z", "com.a"])
+  // A genuine metadata change is allowed to prepare a new order.
+  h.orderTargetPackages(directory, new Map([["com.a", { label: "Aardvark" }]]), "name")
+  assert.ok(comparisons > preparedComparisons)
+})
+
+test("prepared explicit sorts retain legacy results across query, filters, missing targets, UID and users", () => {
+  const snapshot = structuredClone(status)
+  const config = {
+    ...structuredClone(draft),
+    targets: [...draft.targets, { package_name: "com.missing", mode: "hack" }, { package_name: "com.a@010", mode: "generate" }, { package_name: "uid:10001", mode: "hack" }],
+  }
+  const prepare = createTargetPackageDirectory()
+  const directory = prepare(status, config)
+  const metadata = new Map([...labels, ["com.a@010", { label: "Work Alpha", installedAt: 400 }]])
+  for (const sort of ["name", "package", "installed"]) {
+    const ordered = orderTargetPackages(directory, metadata, sort)
+    for (const query of ["", "ALPHA", "com.", "@010", "uid:", "not found"]) {
+      for (const filter of ["listed", "all", "selected", "system", "user"]) {
+        for (const showSystem of [undefined, false, true]) {
+          assert.deepEqual(
+            filterTargetPackages(ordered, config, query, filter, metadata, showSystem),
+            visiblePackages(status, config, query, filter, metadata, pinned, sort, showSystem),
+          )
+        }
+      }
+    }
+  }
+  const recent = filterTargetPackages(orderTargetPackages(directory, metadata, "installed"), config, "", "all", metadata, false)
+  assert.deepEqual(names(recent), ["com.a@010", "com.a", "com.z", "uid:10001"])
+  assert.equal(recent[0].installed, false)
+  assert.equal(recent[0].mode, "generate")
+  assert.deepEqual(status, snapshot, "preparing and ordering never mutate the native package order")
 })
 
 test("native metadata never treats uncontracted install time fields as reliable dates", async () => {

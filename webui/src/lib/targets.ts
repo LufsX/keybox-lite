@@ -90,7 +90,18 @@ export function parseTargetEntry(raw: string): TargetEntry {
   return value
 }
 export function targetEntryStatusCommand(bin: string): string { return shellQuote(bin) + " targets entry status" }
-export function parseTargetStatus(raw: string): TargetStatus {
+function validPackages(value: unknown): value is TargetPackage[] {
+  return Array.isArray(value) && value.every(item => validTarget(item) && object(item) &&
+    typeof item.system === "boolean" && typeof item.selected === "boolean" && typeof item.installed === "boolean") &&
+    uniqueNames(value)
+}
+export function parseTargetPackages(raw: string): TargetPackage[] {
+  const value: unknown = JSON.parse(raw)
+  if (!validPackages(value)) throw new Error("Invalid targets packages JSON")
+  return value
+}
+export function targetPackagesCommand(bin: string): string { return shellQuote(bin) + " targets packages" }
+export function parseTargetStatus(raw: string, previousPackages?: TargetPackage[]): TargetStatus {
   const value: unknown = JSON.parse(raw)
   if (!object(value) || typeof value.supported !== "boolean" ||
       !(value.backend === null || (object(value.backend) && typeof value.backend.backend === "string" &&
@@ -98,13 +109,11 @@ export function parseTargetStatus(raw: string): TargetStatus {
         ["name", "version", "module_id"].every(key => value.backend !== null && object(value.backend) &&
           (value.backend[key] === undefined || typeof value.backend[key] === "string")))) ||
       !object(value.config) || !validDraft({ ...value.config, system_apps: value.system_apps, auto_add_new_apps: value.auto_add_new_apps }) ||
-      !Array.isArray(value.packages) || !value.packages.every(item => validTarget(item) && object(item) &&
-        typeof item.system === "boolean" && typeof item.selected === "boolean" && typeof item.installed === "boolean") ||
-      !uniqueNames(value.packages) || !validEntry(value.entry) ||
+      (value.packages === undefined ? previousPackages === undefined : !validPackages(value.packages)) || !validEntry(value.entry) ||
       typeof value.revision !== "string" || !value.revision.trim() ||
       (value.config_error !== undefined && typeof value.config_error !== "string") ||
       (value.packages_error !== undefined && typeof value.packages_error !== "string")) throw new Error("Invalid targets status JSON")
-  return value as unknown as TargetStatus
+  return { ...value, packages: value.packages ?? previousPackages } as unknown as TargetStatus
 }
 export function parseTargetAck(raw: string): void {
   const value: unknown = JSON.parse(raw)
@@ -118,7 +127,9 @@ export function shellQuote(value: string): string {
   if (value.includes("\0")) throw new Error("Invalid shell argument")
   return "'" + value.replace(/'/g, "'\"'\"'") + "'"
 }
-export function targetStatusCommand(bin: string): string { return shellQuote(bin) + " targets status" }
+export function targetStatusCommand(bin: string, configOnly = false): string {
+  return shellQuote(bin) + " targets status" + (configOnly ? " --config-only" : "")
+}
 export function targetSaveCommand(bin: string, revision: string, draft: TargetDraft): string {
   if (!validDraft(draft) || !revision.trim()) throw new Error("Invalid targets configuration")
   return "printf %s " + shellQuote(JSON.stringify({ revision, ...draft })) + " | " + shellQuote(bin) + " targets save"
@@ -127,38 +138,80 @@ export function targetEntryCommand(bin: string, enabled: boolean): string {
   return shellQuote(bin) + " targets entry set " + (enabled ? "on" : "off")
 }
 export type TargetSort = "name" | "package" | "installed"
-export function visiblePackages(status: TargetStatus, draft: TargetDraft, query: string, filter = "listed", labels: ReadonlyMap<string, AppLabel> = new Map(), pinned?: ReadonlySet<string>, sort?: TargetSort, showSystem?: boolean): TargetPackage[] {
+/**
+ * The directory depends on package membership, not draft selection or modes.
+ * Returning the same array lets Svelte retain its prepared metadata and order.
+ */
+export function createTargetPackageDirectory() {
+  let source: TargetPackage[] | undefined
+  let sourceKey = ""
+  let known = new Set<string>()
+  let missingKey = ""
+  let directory: TargetPackage[] = []
+  return (status: TargetStatus, draft: TargetDraft): TargetPackage[] => {
+    let changed = false
+    if (source !== status.packages) {
+      const key = JSON.stringify(status.packages.map(item => [item.package_name, item.system, item.installed, item.mode]))
+      changed = key !== sourceKey
+      sourceKey = key
+      source = status.packages
+      known = new Set(status.packages.map(item => item.package_name))
+    }
+    const system = new Set(draft.system_apps)
+    const missing = draft.targets.filter(item => !known.has(item.package_name))
+      .map(item => ({ package_name: item.package_name, system: system.has(item.package_name), installed: false, selected: false, mode: "auto" as const }))
+    const key = JSON.stringify(missing.map(item => [item.package_name, item.system]))
+    if (changed || key !== missingKey) {
+      missingKey = key
+      directory = [...status.packages, ...missing]
+    }
+    return directory
+  }
+}
+
+/** Sort a copy once; query, filters and draft state are applied separately. */
+export function orderTargetPackages(packages: readonly TargetPackage[], labels: ReadonlyMap<string, AppLabel>, sort?: TargetSort, pinned?: ReadonlySet<string>): TargetPackage[] {
+  return [...packages].sort((a, b) => {
+    if (sort === undefined) {
+      const priority = Number(pinned?.has(b.package_name) ?? b.selected) - Number(pinned?.has(a.package_name) ?? a.selected)
+      if (priority) return priority
+    }
+    if (sort === "installed") {
+      const first = labels.get(a.package_name)?.installedAt
+      const second = labels.get(b.package_name)?.installedAt
+      const aTime = typeof first === "number" && Number.isFinite(first) && first > 0 ? first : null
+      const bTime = typeof second === "number" && Number.isFinite(second) && second > 0 ? second : null
+      if (aTime === null && bTime !== null) return 1
+      if (aTime !== null && bTime === null) return -1
+      if (aTime !== null && bTime !== null && aTime !== bTime) return bTime - aTime
+    }
+    return sort === "package" ? a.package_name.localeCompare(b.package_name) :
+      compareAppNames(labels.get(a.package_name)?.label || a.package_name, labels.get(b.package_name)?.label || b.package_name) ||
+      a.package_name.localeCompare(b.package_name)
+  })
+}
+
+/** Project current selection/modes and filter the existing order without sorting. */
+export function filterTargetPackages(packages: readonly TargetPackage[], draft: TargetDraft, query: string, filter = "listed", labels: ReadonlyMap<string, AppLabel> = new Map(), showSystem?: boolean): TargetPackage[] {
   const selected = new Map(draft.targets.map(item => [item.package_name, item.mode]))
-  const known = new Set(status.packages.map(item => item.package_name))
   const system = new Set(draft.system_apps)
-  const packages = status.packages.map(item => ({ ...item, selected: selected.has(item.package_name), mode: selected.get(item.package_name) ?? item.mode }))
-  for (const target of draft.targets) {
-    if (!known.has(target.package_name)) {
-      packages.push({ ...target, system: system.has(target.package_name), installed: false, selected: true })
-      known.add(target.package_name)
+  const search = query.trim().toLowerCase()
+  const result: TargetPackage[] = []
+  for (const item of packages) {
+    const isSelected = selected.has(item.package_name)
+    if ((showSystem !== false || !item.system) &&
+        (item.package_name.toLowerCase().includes(search) || (labels.get(item.package_name)?.label ?? "").toLowerCase().includes(search)) &&
+        (filter === "listed" ? showSystem || !item.system || system.has(item.package_name) || isSelected :
+          filter === "all" || (filter === "selected" ? isSelected : filter === "system" ? item.system : !item.system))) {
+      result.push({ ...item, selected: isSelected, mode: selected.get(item.package_name) ?? item.mode })
     }
   }
-  const search = query.trim().toLowerCase()
-  return packages.filter(item => (showSystem !== false || !item.system) && (item.package_name.toLowerCase().includes(search) || (labels.get(item.package_name)?.label ?? "").toLowerCase().includes(search)) &&
-    (filter === "listed" ? showSystem || !item.system || system.has(item.package_name) || item.selected :
-      filter === "all" || (filter === "selected" ? item.selected : filter === "system" ? item.system : !item.system)))
-    .sort((a, b) => {
-      // Omitted sorting preserves the selection grouping used by system dialogs.
-      if (sort === undefined) {
-        const priority = Number(pinned?.has(b.package_name) ?? b.selected) - Number(pinned?.has(a.package_name) ?? a.selected)
-        if (priority) return priority
-      }
-      if (sort === "installed") {
-        const first = labels.get(a.package_name)?.installedAt
-        const second = labels.get(b.package_name)?.installedAt
-        const aTime = typeof first === "number" && Number.isFinite(first) && first > 0 ? first : null
-        const bTime = typeof second === "number" && Number.isFinite(second) && second > 0 ? second : null
-        if (aTime === null && bTime !== null) return 1
-        if (aTime !== null && bTime === null) return -1
-        if (aTime !== null && bTime !== null && aTime !== bTime) return bTime - aTime
-      }
-      return sort === "package" ? a.package_name.localeCompare(b.package_name) :
-        compareAppNames(labels.get(a.package_name)?.label || a.package_name, labels.get(b.package_name)?.label || b.package_name) ||
-        a.package_name.localeCompare(b.package_name)
-    })
+  return result
+}
+
+export function visiblePackages(status: TargetStatus, draft: TargetDraft, query: string, filter = "listed", labels: ReadonlyMap<string, AppLabel> = new Map(), pinned?: ReadonlySet<string>, sort?: TargetSort, showSystem?: boolean): TargetPackage[] {
+  const directory = createTargetPackageDirectory()(status, draft)
+  const rows = filterTargetPackages(directory, draft, query, filter, labels, showSystem)
+  // Omitted sorting preserves the selection grouping used by system dialogs.
+  return orderTargetPackages(rows, labels, sort, pinned)
 }

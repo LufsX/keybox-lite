@@ -98,15 +98,37 @@ export async function execUpdate(
   stateDir = "/data/adb/keybox-lite",
 ): Promise<ExecResult> {
   let dir = ""
+  const monitor = new AbortController()
+  const visibility = typeof document === "undefined" ? undefined : document
   const sleepers = new Set<() => void>()
-  const abort = () => { for (const wake of sleepers) wake() }
-  const pause = (ms: number) => new Promise<void>((resolve) => {
-    const wake = () => { clearTimeout(timer); sleepers.delete(wake); resolve() }
+  const stopRequests = new Set<Promise<ExecResult>>()
+  let finished = false
+  let wakePoll: (() => void) | undefined
+  let pollRequested = false
+  const abort = () => {
+    monitor.abort()
+    for (const wake of sleepers) wake()
+  }
+  const visibilityChanged = () => {
+    if (visibility?.visibilityState === "hidden") return
+    // Keep the request until the next read starts, including during native I/O.
+    pollRequested = true
+    wakePoll?.()
+  }
+  const pause = (ms: number, polling = false) => new Promise<void>((resolve) => {
+    const wake = () => {
+      clearTimeout(timer)
+      sleepers.delete(wake)
+      if (wakePoll === wake) wakePoll = undefined
+      resolve()
+    }
     const timer = setTimeout(wake, ms)
     sleepers.add(wake)
-    if (signal.aborted) wake()
+    if (polling) wakePoll = wake
+    if (finished || monitor.signal.aborted || (polling && pollRequested)) wake()
   })
   signal.addEventListener("abort", abort)
+  visibility?.addEventListener("visibilitychange", visibilityChanged)
   const invalid = (detail: string): ExecResult => ({ errno: -1, stdout: "", stderr: detail, failure: "bridge" })
   try {
     if (signal.aborted) return invalid("Update monitor disposed")
@@ -116,6 +138,8 @@ export async function execUpdate(
       'if stat=$(cat "/proc/$pid/stat" 2>/dev/null); then\nstat=${stat##*) }\n' +
       'set -- $stat\nshift 19\nprintf "%s %s\\n" "$pid" "$1" > "$dir/process"\nfi\n' +
       'wait "$pid"\nrc=$?\nprintf "%s\\n" "$rc" > "$dir/result.tmp" && mv "$dir/result.tmp" "$dir/result"'
+    // Native launch cannot be cancelled. Keep the default 15s wait after
+    // disposal so its directory can still be learned and removed in finally.
     const started = await exec(
       'umask 077\ndir=$(mktemp -d /data/local/tmp/keybox-webui.XXXXXXXX) || exit $?\n' +
       ': > "$dir/log" || { rm -rf "$dir"; exit 1; }\n' +
@@ -125,12 +149,13 @@ export async function execUpdate(
     if (/^\/data\/local\/tmp\/keybox-webui\.[A-Za-z0-9]+$/.test(candidate)) dir = candidate
     if (started.errno !== 0 || started.failure) return started
     if (!dir) return invalid("Invalid update monitor directory")
+    if (monitor.signal.aborted) return invalid("Update monitor disposed")
     const path = quote(dir)
     onStarted(async () => {
       // A click during supervisor startup waits for its control record.
       // A completed or rejected launch can never target another update.
-      for (let attempt = 0; attempt < 30 && !signal.aborted; attempt++) {
-        const stopped = await exec(
+      for (let attempt = 0; attempt < 30 && !finished && !monitor.signal.aborted; attempt++) {
+        const request = exec(
       'dir=' + path + '\n[ ! -f "$dir/result" ] || exit 1\n' +
       '[ -f "$dir/process" ] || { echo STARTING; exit 0; }\n' +
       'read pid start < "$dir/process" || exit 1\n' +
@@ -143,36 +168,55 @@ export async function execUpdate(
       'child=$(sed -n \'s/.*"pid":\\([0-9]*\\).*/\\1/p\' "$job")\n' +
       'stat=$(cat "/proc/$child/stat") || exit 1\nstat=${stat##*) }\n' +
       'set -- $stat\n[ "$2" = "$pid" ] || { echo STARTING; exit 0; }\nkill -TERM "$pid"',
-          undefined, 15_000, signal,
+          undefined, 15_000, monitor.signal,
         )
+        stopRequests.add(request)
+        const stopped = await request
+        stopRequests.delete(request)
         if (stopped.errno !== 0 || stopped.failure || stopped.stdout.trim() !== "STARTING") return stopped
         await pause(100)
       }
       return invalid("Update supervisor is not ready to stop")
     })
     const deadline = Date.now() + timeoutMs
-    while (!signal.aborted) {
+    let previousOutput: string | undefined
+    while (!monitor.signal.aborted) {
+      pollRequested = false
       const result = await exec(
         'dir=' + path + '\nif [ -f "$dir/result" ]; then cat "$dir/result"; else echo RUNNING; fi\n' +
         'tail -c 80000 "$dir/log"',
-        undefined, 15_000, signal,
+        undefined, Math.min(15_000, Math.max(0, deadline - Date.now())), monitor.signal,
       )
-      if (signal.aborted) break
-      if (result.errno !== 0 || result.failure) return result
+      if (monitor.signal.aborted) break
+      // A failed polling shell is not the detached operation\'s exit status.
+      if (result.errno !== 0 || result.failure) return { ...result, failure: result.failure ?? "bridge" }
       const boundary = result.stdout.indexOf("\n")
       const status = result.stdout.slice(0, boundary)
       const output = result.stdout.slice(boundary + 1)
       if (boundary < 0 || (status !== "RUNNING" && !/^(0|[1-9][0-9]{0,2})$/.test(status)) || Number(status) > 255) {
         return invalid("Invalid update completion status")
       }
-      onOutput(output)
-      if (status !== "RUNNING") return { errno: Number(status), stdout: output, stderr: "" }
-      if (Date.now() >= deadline) return { errno: -1, stdout: output, stderr: "", failure: "timeout" }
-      await pause(500)
+      if (output !== previousOutput) {
+        previousOutput = output
+        onOutput(output)
+      }
+      if (status !== "RUNNING") {
+        finished = true
+        for (const wake of sleepers) wake()
+        // App awaits stop acknowledgement to classify exit 130 as cancellation.
+        // Let an issued stop report its result before disposing native callbacks.
+        await Promise.all(stopRequests)
+        return { errno: Number(status), stdout: output, stderr: "" }
+      }
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) return { errno: -1, stdout: output, stderr: "", failure: "timeout" }
+      await pause(Math.min(visibility?.visibilityState === "hidden" ? 2_500 : 500, remaining), true)
     }
     return invalid("Update monitor disposed")
   } finally {
+    finished = true
     signal.removeEventListener("abort", abort)
+    visibility?.removeEventListener("visibilitychange", visibilityChanged)
     abort()
     // Unlinking the log also releases disk space if the view is destroyed while
     // the detached supervisor continues. Destruction does not cancel updates.

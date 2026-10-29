@@ -109,6 +109,76 @@ END { if (!done || bad) exit 1 }
 '`
 }
 
+/**
+ * One context/fingerprint slot, fresh for 30 seconds after a successful read.
+ * Subscriber abort only detaches that subscriber. With no subscribers, the
+ * bounded 15-second read may finish and warm the cache for a returning page.
+ * Invalidation/key changes abort the shared read and prevent late publication.
+ */
+export function createInstallTimesCache(
+  read: (signal: AbortSignal) => Promise<Map<string, number>> = readInstallTimes,
+  now: () => number = Date.now,
+  ttl = 30_000,
+) {
+  type Entry = {
+    key: string
+    controller: AbortController
+    promise: Promise<Map<string, number>>
+    value?: Map<string, number>
+    expires: number
+  }
+  let current: Entry | undefined
+  const aborted = () => new InstallTimesError("aborted", "Install time request aborted")
+  function invalidate() {
+    const previous = current
+    current = undefined
+    previous?.controller.abort()
+  }
+  function get(context: string, fingerprint: string, signal?: AbortSignal): Promise<Map<string, number>> {
+    if (signal?.aborted) return Promise.reject(aborted())
+    const key = JSON.stringify([context, fingerprint])
+    if (current && (current.key !== key || (current.value && now() >= current.expires))) invalidate()
+    if (!current) {
+      const controller = new AbortController()
+      const entry: Entry = { key, controller, promise: undefined!, expires: 0 }
+      current = entry
+      entry.promise = Promise.resolve().then(() => {
+        if (controller.signal.aborted) throw aborted()
+        return read(controller.signal)
+      }).then(value => {
+        if (current !== entry || controller.signal.aborted) throw aborted()
+        if (!value.size) throw new InstallTimesError("output", "No known package install times")
+        entry.value = new Map(value)
+        entry.expires = now() + ttl
+        return entry.value
+      }).catch(error => {
+        if (current === entry) current = undefined
+        throw error
+      })
+    }
+    const entry = current
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        signal?.removeEventListener("abort", cancel)
+        entry.controller.signal.removeEventListener("abort", cancel)
+      }
+      const cancel = () => { cleanup(); reject(aborted()) }
+      signal?.addEventListener("abort", cancel, { once: true })
+      entry.controller.signal.addEventListener("abort", cancel, { once: true })
+      entry.promise.then(value => {
+        cleanup()
+        if (signal?.aborted || entry.controller.signal.aborted) reject(aborted())
+        else resolve(new Map(value))
+      }, error => { cleanup(); reject(error) })
+    })
+  }
+  return { get, invalidate }
+}
+
+const installTimesCache = createInstallTimesCache()
+export const cachedInstallTimes = installTimesCache.get
+export const invalidateInstallTimes = installTimesCache.invalidate
+
 /** Unknown times are absent. Operational failures reject; aborted reads publish nothing. */
 export async function readInstallTimes(signal?: AbortSignal): Promise<Map<string, number>> {
   if (signal?.aborted) throw new InstallTimesError("aborted", "Install time request aborted")
