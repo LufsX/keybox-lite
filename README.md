@@ -143,11 +143,13 @@ WebUI output and archives are ignored by Git.
 
 ## Development checks
 
+`make check` runs Go tests and vet, Shell syntax and regression checks, WebUI type and unit checks, browser regressions and a WebUI build. Install the browser once with `(cd webui && npm run test:browser:install)` after installing the WebUI dependencies; browser regressions start and stop their own local test server.
+
 Go tests are stored in `src/test/`. The runner uses Go’s build overlay to run them in their original packages; package arguments are relative to `src`. Run the complete suite through the runner because plain `go test ./...` skips the separate test module.
 
     sh src/test/run.sh test ./...
     sh src/test/run.sh vet ./...
-    sh -n action.sh settings.sh service.sh webui.sh customize.sh uninstall.sh build.sh package.sh
+    sh -c 'for script in *.sh src/test/run.sh tests/*.sh; do sh -n "$script" || exit; done'
     sh tests/lock-compatibility.sh
     # Wrapper compatibility with the Android shell:
     # mksh tests/lock-compatibility.sh
@@ -155,7 +157,7 @@ Go tests are stored in `src/test/`. The runner uses Go’s build overlay to run 
     sh tests/sources-regression.sh
     sh tests/source-race-regression.sh
     sh tests/standalone-integration.sh
-    (cd webui && npm run check && npm test && npm run build)
+    (cd webui && npm run check:all)
 
 See [AGENTS.md](AGENTS.md) for architecture, compatibility and validation guidelines.
 
