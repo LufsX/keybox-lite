@@ -34,11 +34,11 @@ function harness({ saved, storageFails = false } = {}) {
     export const handlers = {
       toggleTheme, toggleLanguage, setTheme, setLanguage,
       targetLinkTitle: () => targetBackendTitle(info?.backend, messages[lang].targetsTitle),
-      showLog, showCurrentOutput, checkRevocation, update, loadInfo, shellQuote,
+      showLog, showCurrentOutput, checkRevocation, update, loadInfo, shellQuote, setOutput,
       seed: () => { setOutput("current output"); checkRc = 1 },
       setBusy: value => { busy = value },
       setError: value => { error = value },
-      state: () => ({ lang, theme, themeOpen, languageOpen, savedLogVisible, output, savedOutput, savedOutputLines, logLoading, checkRc, certificateVerification, info, infoStale, error, busy })
+      state: () => ({ lang, theme, themeOpen, languageOpen, savedLogVisible, output, savedOutput, savedOutputLines, outputLines, logLoading, checkRc, certificateVerification, info, infoStale, error, busy })
     }
   `
   runInNewContext(compile(source + hooks), {
@@ -137,6 +137,19 @@ function dropdownHarness({ disabled = false } = {}) {
   module.exports.handlers.bind({ contains: node => node === inside }, { focus: () => { focused++ } })
   return { ...module.exports.handlers, changes, choices, inside, outside, focused: () => focused }
 }
+
+test("unchanged update snapshots retain parsed output and empty appends do not redraw", () => {
+  const h = harness()
+  h.setOutput("[CHECK] running\\n")
+  const parsed = h.state().outputLines
+  h.setOutput("[CHECK] running\\n")
+  assert.equal(h.state().outputLines, parsed)
+  h.setOutput("", true)
+  assert.equal(h.state().outputLines, parsed)
+  h.setOutput("[DONE] complete\\n", true)
+  assert.notEqual(h.state().outputLines, parsed)
+  assert.equal(h.state().output, "[CHECK] running\\n[DONE] complete\\n")
+})
 
 test("language and theme menus toggle mutually exclusively", () => {
   const h = harness()

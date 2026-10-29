@@ -1,12 +1,14 @@
 <script lang="ts">
-  import { onDestroy, untrack } from "svelte"
+  import { onDestroy, onMount, untrack, tick } from "svelte"
   import { slide } from "svelte/transition"
-  import { Link2, Unlink, Loader2, Search, KeyRound, ChevronRight, ChevronDown, NotebookPen, Undo2, PackagePlus, RefreshCw, ListPlus, SlidersHorizontal, SquareDashed, CheckCheck, Settings2 } from "lucide-svelte"
+  import { Link2, Unlink, Loader2, Search, KeyRound, ChevronRight, ChevronDown, NotebookPen, Undo2, PackagePlus, RefreshCw, ListPlus, SlidersHorizontal, SquareDashed, CheckCheck, Settings2, Import, Download } from "lucide-svelte"
   import { packagesInfo } from "../apps"
-  import { readInstallTimes } from "../installTimes"
+  import { cachedInstallTimes, invalidateInstallTimes } from "../installTimes"
   import AppRow from "./AppRow.svelte"
   import AppListSkeleton from "./AppListSkeleton.svelte"
   import Modal from "./Modal.svelte"
+  import TargetTransfer from "./TargetTransfer.svelte"
+  import { resolveTargetTransferMessages } from "../targetTransferMessages"
   import Dropdown from "./Dropdown.svelte"
   import VirtualList from "./VirtualList.svelte"
   import { exec, type ExecResult } from "../bridge"
@@ -15,14 +17,18 @@
   import { surface, reveal, pageExit } from "../motion"
   import { stickySearch } from "../stickySearch"
   import {
-    modes, policyKeys, validPackage, validDraft, validPolicy, validPolicyValue, parseTargetStatus, parseTargetAck,
+    modes, policyKeys, validPackage, validDraft, validPolicy, validPolicyValue, parseTargetStatus, parseTargetAck, parseTargetPackages, targetPackagesCommand,
     draftFromStatus, targetBackendTitle, targetStatusCommand, targetSaveCommand, targetEntryCommand, visiblePackages,
+    createTargetPackageDirectory, orderTargetPackages, filterTargetPackages,
     parseTargetEntry, targetEntryStatusCommand, type TargetEntry,
     type TargetStatus, type TargetDraft, type TargetMode, type PolicyKey, type Policy, type TargetSort,
   } from "../targets"
 
-  let { bin, lang, disabled = false, onMenuChange, onTitleVisibility, onTitleChange }: { bin: string; lang: Locale; disabled?: boolean; onMenuChange?: (open: boolean) => void; onTitleVisibility?: (visible: boolean) => void; onTitleChange?: (title: string) => void } = $props()
+  let { bin, lang, disabled = false, onMenuChange, onTitleVisibility, onTitleChange, onNotice }: { bin: string; lang: Locale; disabled?: boolean; onMenuChange?: (open: boolean) => void; onTitleVisibility?: (visible: boolean) => void; onTitleChange?: (title: string) => void; onNotice?: (text: string) => void } = $props()
   let m = $derived(messages[lang])
+  let transferMessages = $derived(resolveTargetTransferMessages(lang))
+  let transfer = $state<"import" | "export" | null>(null)
+  let transferSequence = 0
   let status = $state<TargetStatus | null>(null)
   let draft = $state<TargetDraft | null>(null)
   let baseline = $state("")
@@ -33,11 +39,17 @@
   let entry = $state<TargetEntry | null>(null)
   let entryBusy = $state(false)
   let entryError = $state("")
-  let entryNotice = $state("")
   let entrySequence = 0
   let saving = $state(false)
   let error = $state("")
-  let notice = $state("")
+  let refreshingPackages = $state(false)
+  let pullDistance = $state(0)
+  let pulling = $state(false)
+  const pullThreshold = 32
+  let initialLoad: Promise<void> | undefined
+  let targetReading = false
+  let targetReadController: AbortController | undefined
+  let targetReadError = ""
   let query = $state("")
   let filter = $state("listed")
   const preferenceKey = "keybox-lite.target-list-preferences"
@@ -53,7 +65,16 @@
   let installTimesError = $state("")
   let installTimesSequence = 0
   let installTimesController: AbortController | undefined
-  let checkedInstallNames = ""
+  let checkedInstallKey = ""
+  let loadedInstallKey = ""
+  let installTimesVersion = $state(0)
+  function invalidateInstallSort() {
+    cancelInstallSort()
+    invalidateInstallTimes()
+    checkedInstallKey = ""
+    loadedInstallKey = ""
+    installTimesVersion++
+  }
   function saveListPreferences() { try { localStorage.setItem(preferenceKey, JSON.stringify({ sort: sortReady ? targetSort : requestedSort, showSystem: showSystemApps })) } catch {} }
   function cancelInstallSort() {
     installTimesSequence++
@@ -73,30 +94,45 @@
       saveListPreferences()
       return
     }
-    if (!status) { sortReady = false; return }
-    const id = installTimesSequence, path = bin, names = metadataNames
+    if (!status || !packageContext) { sortReady = false; return }
+    const key = installKey
+    if (loadedInstallKey === key) {
+      targetSort = "installed"
+      sortReady = true
+      saveListPreferences()
+      return
+    }
+    await readInstallTimes(true)
+  }
+  async function readInstallTimes(applySort: boolean) {
+    if (!status || !packageContext) return
+    const key = installKey
+    const id = installTimesSequence, path = bin, context = packageContext, names = loadedPackageNames
     const controller = new AbortController()
     installTimesController = controller
     installTimesLoading = true
-    const live = () => !disposed && !disabled && bin === path && id === installTimesSequence && !controller.signal.aborted
+    installTimesError = ""
+    const live = () => !disposed && !disabled && bin === path && installKey === key && id === installTimesSequence && !controller.signal.aborted
     try {
       const hasPackages = status.packages.some(item => !item.package_name.startsWith("uid:")) ||
         !!draft?.targets.some(item => !item.package_name.startsWith("uid:"))
-      const times = hasPackages ? await readInstallTimes(controller.signal) : new Map<string, number>()
+      const times = hasPackages ? await cachedInstallTimes(context, names, controller.signal) : new Map<string, number>()
       if (!live()) return
       if (hasPackages && !times.size) throw new Error("Missing install times")
       // Publish the data and selected sort together; the previous list remains
       // visible while the request is pending.
       installTimes = times
-      checkedInstallNames = names
-      targetSort = "installed"
-      sortReady = true
-      saveListPreferences()
+      checkedInstallKey = key
+      loadedInstallKey = key
+      if (applySort) {
+        targetSort = "installed"
+        sortReady = true
+        saveListPreferences()
+      }
     } catch {
       if (live()) {
-        checkedInstallNames = names
-        requestedSort = targetSort
-        sortReady = true
+        checkedInstallKey = key
+        if (applySort) { requestedSort = targetSort; sortReady = true }
         installTimesError = m.targetsInstallTimeFailed
       }
     } finally {
@@ -123,7 +159,13 @@
   let systemBaseline = ""
   let metadata = $state<Map<string, { label: string; icon: string | null }>>(new Map())
   let metadataSequence = 0
-  let metadataNames = $derived(status ? [...new Set([...status.packages.map(item => item.package_name), ...(draft?.targets.map(item => item.package_name) ?? [])])].sort().join("\n") : "")
+  let cancelMetadata: (() => void) | undefined
+  let loadedPackageNames = $state("")
+  let packageContext = $state("")
+  const prepareDirectory = createTargetPackageDirectory()
+  let packageDirectory = $derived(status && draft ? prepareDirectory(status, draft) : [])
+  let metadataNames = $derived(packageDirectory.map(item => item.package_name).sort().join("\n"))
+  let installKey = $derived(JSON.stringify([packageContext, loadedPackageNames]))
   let systemSelection = $state<ReadonlySet<string>>(new Set())
   let systemRows = $derived(status && draft ? visiblePackages(status, draft, systemQuery, "system", metadata, systemSelection) : [])
   let fabCollapsed = $state(false)
@@ -138,19 +180,29 @@
   let editable = $derived(!locked && ready && !!status?.supported && !!status?.backend?.active)
   let dirty = $derived(!!draft && JSON.stringify(draft) !== baseline)
   let sortMetadata = $derived(new Map(metadataNames.split("\n").filter(Boolean).map(name => [name, { label: metadata.get(name)?.label || name, installedAt: installTimes.get(name.includes("@") ? name.split("@")[0] + "@" + Number(name.split("@")[1]) : name) }])))
-  let visible = $derived(status && draft ? visiblePackages(status, draft, query, filter, sortMetadata, initialSelection ?? undefined, targetSort, showSystemApps) : [])
+  let orderedPackages = $derived(orderTargetPackages(packageDirectory, sortMetadata, targetSort))
+  let visible = $derived(draft ? filterTargetPackages(orderedPackages, draft, query, filter, sortMetadata, showSystemApps) : [])
   const inputClass = "min-h-8 min-w-0 rounded-lg border border-[var(--line)] bg-[var(--inset)] px-2 py-1 text-xs text-[var(--text)] disabled:opacity-50"
 
   $effect(() => {
     if (bin !== contextBin) {
-      cancelInstallSort()
+      invalidateInstallSort()
+      cancelMetadata?.()
+      cancelMetadata = undefined
+      loadedPackageNames = ""
+      packageContext = ""
+      refreshingPackages = false
+      pulling = false
+      targetReadController?.abort()
+      targetReadError = ""
+      pullDistance = 0
       if (sortReady) requestedSort = targetSort
       installTimes = new Map()
-      checkedInstallNames = ""
       sortReady = requestedSort !== "installed"
       targetSort = requestedSort === "installed" ? "name" : requestedSort
       closeEditor()
       closeSheet()
+      closeTransfer()
       menuOpen = false
       contextBin = bin
       sequence++
@@ -163,15 +215,19 @@
       entry = null
       entryBusy = false
       entryError = ""
-      entryNotice = ""
       saving = false
       metadata = new Map()
       draft = null
       baseline = ""
       error = ""
-      notice = ""
     }
-    if (disabled) { closeEditor(); closeSheet(); menuOpen = false }
+    if (disabled) {
+      closeEditor(); closeSheet(); closeTransfer(); menuOpen = false
+      cancelMetadata?.()
+      cancelMetadata = undefined
+      pullDistance = 0
+      refreshingPackages = false
+    }
     if (disabled && installTimesLoading) {
       cancelInstallSort()
       if (sortReady) requestedSort = targetSort
@@ -187,21 +243,18 @@
   $effect(() => {
     const path = bin, blocked = disabled
     untrack(() => {
-      if (path && !blocked && !status && !pending) void refresh(false, true)
+      if (path && !blocked && !status && !pending) initialLoad = refresh(false, true)
     })
   })
-  $effect(() => {
-    const names = metadataNames, path = bin, blocked = disabled
-    return untrack(() => names && path && !blocked ? loadMetadata(names.split("\n"), path) : undefined)
-  })
-  onDestroy(() => { disposed = true; cancelInstallSort(); sequence++; entrySequence++; metadataSequence++ })
+  onDestroy(() => { disposed = true; targetReadController?.abort(); closeTransfer(); cancelMetadata?.(); cancelInstallSort(); sequence++; entrySequence++; metadataSequence++ })
 
   function loadMetadata(names: string[], path: string) {
     const id = ++metadataSequence
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 6000)
     const apply = (value: Map<string, { label: string; icon: string | null }>) => {
-      if (!disposed && !controller.signal.aborted && id === metadataSequence && bin === path && !disabled) metadata = value
+      if (!disposed && !controller.signal.aborted && id === metadataSequence && bin === path && !disabled)
+        metadata = new Map([...metadata, ...value])
     }
     void packagesInfo(names, controller.signal, apply).then(apply).catch(() => {
       // Keep any batches already received when a later batch fails.
@@ -213,10 +266,15 @@
 
   $effect(() => {
     const path = bin, blocked = disabled, initial = !sortReady, loaded = ready
-    const names = metadataNames, sort = targetSort, loading = installTimesLoading
+    const key = installKey, sort = targetSort, refreshing = refreshingPackages
+    // Only a package refresh changes this key; editing targets retains the snapshot.
+    void installTimesVersion
+    void installTimesLoading
     untrack(() => {
-      if (path && !blocked && loaded && !loading && (initial || (sort === "installed" && names !== checkedInstallNames))) {
-        void setSort(initial ? requestedSort : sort)
+      if (!path || blocked || !loaded || !packageContext || refreshing) return
+      if (!installTimesLoading && (initial || (requestedSort === "installed" && key !== checkedInstallKey) ||
+          (sort === "installed" && key !== checkedInstallKey))) {
+        void setSort(initial ? requestedSort : "installed")
       }
     })
   })
@@ -248,11 +306,11 @@
       onTitleVisibility?.(false)
     } }
   }
-  export function toggleMenu() { sortMenuOpen = false; menuOpen = !menuOpen }
+  export function toggleMenu() { if (transfer) return; sortMenuOpen = false; menuOpen = !menuOpen }
   function closeMenu(focus = false) {
     menuOpen = false
     sortMenuOpen = false
-    if (focus) document.getElementById("targets-menu-trigger")?.focus()
+    if (focus) document.getElementById("targets-menu-trigger")?.focus({ preventScroll: true })
   }
   function dismissMenu(event: Event) {
     const target = event.target
@@ -276,7 +334,28 @@
     else if (action === "select") selectVisible(true)
     else if (action === "clear") selectVisible(false)
     else if (action === "auto") autoAdd(!draft?.auto_add_new_apps)
+    else if (action === "import" || action === "export") void openTransfer(action)
     else if (["system", "global", "manual", "entry"].includes(action)) openSheet(action as NonNullable<typeof sheet>)
+  }
+  function closeTransfer() { transferSequence++; transfer = null }
+  async function openTransfer(mode: "import" | "export") {
+    if (!canEdit() || entryBusy) return
+    if ((editorChanged() || sheetChanged()) && !window.confirm(m.targetsLeave)) return
+    closeEditor()
+    closeSheet()
+    closeMenu(true)
+    const id = ++transferSequence, path = bin, revision = status?.revision
+    // Let the previous sheet restore focus before opening the next modal.
+    await tick()
+    if (id !== transferSequence || path !== bin || revision !== status?.revision || !canEdit()) return
+    transfer = mode
+  }
+  function applyTransfer(value: TargetDraft): boolean {
+    if (!canEdit() || entryBusy || editor || sheet || transfer !== "import" || !validDraft(value)) return false
+    draft = JSON.parse(JSON.stringify(value))
+    error = ""
+    onNotice?.(transferMessages.loaded)
+    return true
   }
   function openSheet(value: NonNullable<typeof sheet>) {
     if (disposed || disabled || !bin) return
@@ -292,7 +371,10 @@
       globalBaseline = JSON.stringify(globalPolicy)
     }
     sheet = value
-    if (value === "entry") void refreshEntry()
+    if (value === "entry") {
+      if (changed()) onNotice?.(m.targetsEntrySaveFirst)
+      void refreshEntry()
+    }
   }
   function closeSheet() { manualModeOpen = false; sheet = null }
   function sheetChanged() {
@@ -302,7 +384,6 @@
   function applyGlobal(close = true) {
     if (!canEdit() || !draft || !validPolicy(globalPolicy)) return
     draft.default_policy = { ...globalPolicy }
-    notice = ""
     if (close) closeSheet()
   }
   function editGlobalPolicy(key: PolicyKey, value: string) {
@@ -315,18 +396,99 @@
   function applySystem(close = true) {
     if (!canEdit() || !draft) return
     draft.system_apps = [...systemDraft]
-    notice = ""
     if (close) closeSheet()
   }
   function discard() {
     if (!canEdit() || !status || !window.confirm(m.targetsDiscard)) return
     initialSelection = null
     accept(status)
-    notice = ""
+  }
+  function pullToRefresh(node: HTMLDivElement) {
+    let gesture: { id: number; x: number; y: number; claimed: boolean } | undefined
+    let suppressClickUntil = 0
+    let touchTarget: Element | undefined
+    const atTop = () => {
+      const search = node.closest(".target-page")?.querySelector(".target-search")
+      const edge = search?.firstElementChild?.getBoundingClientRect().bottom ?? 0
+      return node.getBoundingClientRect().top >= edge - 2
+    }
+    const available = () => node.isConnected && !disposed && !disabled && (!pending || !status) && !entryBusy && !!bin &&
+      !sheet && !editor && !transfer && !menuOpen && !sortMenuOpen
+    const reset = () => {
+      touchTarget?.removeEventListener("touchmove", move as EventListener)
+      touchTarget?.removeEventListener("touchend", end as EventListener)
+      touchTarget?.removeEventListener("touchcancel", reset)
+      touchTarget = undefined
+      gesture = undefined
+      pulling = false
+      pullDistance = 0
+    }
+    const start = (event: TouchEvent) => {
+      reset()
+      if (event.defaultPrevented || event.touches.length !== 1 || !available() || !atTop()) return
+      const target = event.target
+      if (!(target instanceof Element) || target.closest('input:not([type="checkbox"]), textarea, select, a, [contenteditable], .target-fab-bar, .target-tune') ||
+          (target.closest("button") && !target.closest(".app-row"))) return
+      const touch = event.touches[0]
+      gesture = { id: touch.identifier, x: touch.clientX, y: touch.clientY, claimed: false }
+      // Keep the gesture when the initial response replaces the touched skeleton.
+      touchTarget = target
+      touchTarget.addEventListener("touchmove", move as EventListener, { passive: false })
+      touchTarget.addEventListener("touchend", end as EventListener, { passive: false })
+      touchTarget.addEventListener("touchcancel", reset, { passive: true })
+    }
+    const move = (event: TouchEvent) => {
+      if (!gesture) return
+      if (event.defaultPrevented || event.touches.length !== 1 || !available() || !atTop()) { reset(); return }
+      const touch = event.touches[0]
+      if (touch.identifier !== gesture.id) { reset(); return }
+      const dy = touch.clientY - gesture.y, dx = Math.abs(touch.clientX - gesture.x)
+      if (dy < -4 || dx > Math.max(10, dy)) { reset(); return }
+      if (dy <= 4 && !gesture.claimed) return
+      // Leave normal scrolling alone until a downward gesture owns the top edge.
+      if (!event.cancelable) { reset(); return }
+      event.preventDefault()
+      gesture.claimed = true
+      pulling = true
+      suppressClickUntil = Date.now() + 600
+      pullDistance = Math.min(72, Math.max(0, (dy - 4) * .85))
+    }
+    const end = (event: TouchEvent) => {
+      const claimed = !!gesture?.claimed
+      const refreshNow = claimed && pullDistance >= pullThreshold && event.touches.length === 0 && available() && atTop()
+      if (claimed) {
+        suppressClickUntil = Date.now() + 600
+        if (event.cancelable) event.preventDefault()
+      }
+      reset()
+      if (!refreshNow) return
+      if (pending && !status) {
+        const id = sequence, path = bin
+        refreshingPackages = true
+        void initialLoad?.then(() => {
+          if (live(id, path) && status && available() && atTop()) void refresh()
+        })
+      } else void refresh()
+    }
+    const click = (event: MouseEvent) => {
+      if (Date.now() >= suppressClickUntil) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+    }
+    const scroll = () => { if (!atTop()) reset() }
+    node.addEventListener("touchstart", start, { passive: true })
+    node.addEventListener("click", click, true)
+    window.addEventListener("scroll", scroll, { passive: true })
+    return { destroy() {
+      reset()
+      node.removeEventListener("touchstart", start)
+      node.removeEventListener("click", click, true)
+      window.removeEventListener("scroll", scroll)
+    } }
   }
   function onscroll() {
     // Dialog scrolling must not change the page's floating actions.
-    if (sheet || editor) return
+    if (sheet || editor || transfer) return
     const y = Math.max(0, window.scrollY), delta = y - previousScroll
     previousScroll = y
     if (y <= 48) {
@@ -346,9 +508,10 @@
   }
 
   export function canLeave(): boolean {
-    if (entryBusy) { entryNotice = m.targetsPending; return false }
-    if (pending) { notice = m.targetsPending; return false }
-    return !(changed() || editorChanged() || sheetChanged()) || window.confirm(m.targetsLeave)
+    if (entryBusy || pending) { onNotice?.(m.targetsPending); return false }
+    const allowed = !(changed() || editorChanged() || sheetChanged()) || window.confirm(m.targetsLeave)
+    if (allowed) closeTransfer()
+    return allowed
   }
 
   function modeLabel(mode: TargetMode): string {
@@ -410,10 +573,13 @@
     if (result.failure === "timeout") throw new Error(m.commandTimeout)
     if (result.failure || result.errno !== 0) throw new Error(result.stderr.trim() || m.targetsFailed)
   }
-  async function readStatus(path: string): Promise<TargetStatus> {
-    const result = await exec(targetStatusCommand(path))
+  async function readStatus(path: string, withPackages = false, signal?: AbortSignal): Promise<TargetStatus> {
+    const result = await exec(targetStatusCommand(path, !withPackages), undefined, 15_000, signal)
     requireSuccess(result)
-    try { return parseTargetStatus(result.stdout) } catch { throw new Error(m.targetsInvalid) }
+    try {
+      const value = parseTargetStatus(result.stdout, withPackages ? undefined : status?.packages)
+      return withPackages ? value : { ...value, packages: status?.packages ?? value.packages }
+    } catch { throw new Error(m.targetsInvalid) }
   }
   function accept(value: TargetStatus, entryVersion?: number) {
     status = value
@@ -422,7 +588,6 @@
       entry = value.entry
       entryReady = true
       entryError = ""
-      entryNotice = ""
     }
     ready = !value.config_error && !value.packages_error
     if (!ready) {
@@ -434,29 +599,89 @@
     if (value.backend?.backend !== "tricky-store") draft.per_app_policy = {}
     baseline = JSON.stringify(draft)
   }
-  async function refresh(ask = true, quiet = false) {
+  async function refresh(_ask = true, quiet = false) {
     if (disabled || pending || !bin || disposed) return
-    if (ask && (changed() || editorChanged() || sheetChanged()) && !window.confirm(m.targetsDiscard)) return
-    const resetOrder = changed()
-    closeEditor()
-    if (sheet !== "entry") closeSheet()
+    const initial = !status
     const id = ++sequence, path = bin, entryVersion = entrySequence
     pending = true
-    ready = false
+    refreshingPackages = !initial || !quiet
     error = ""
-    notice = ""
     try {
-      const value = await readStatus(path)
-      if (!live(id, path)) return
-      if (resetOrder) initialSelection = null
-      accept(value, entryVersion)
-      if (ready && !quiet) notice = m.targetsRefreshed
+      if (initial) {
+        const value = await readStatus(path, true)
+        if (!live(id, path)) return
+        accept(value, entryVersion)
+      } else {
+        const result = await exec(targetPackagesCommand(path))
+        if (!live(id, path)) return
+        requireSuccess(result)
+        let packages
+        try { packages = parseTargetPackages(result.stdout) } catch { throw new Error(m.targetsInvalid) }
+        status = { ...status!, packages, packages_error: undefined }
+        if (!draft) accept(status, entryVersion)
+      }
+      if (status) {
+        loadedPackageNames = metadataNames
+        packageContext = JSON.stringify([path, status.backend])
+        if (!initial) invalidateInstallSort()
+        cancelMetadata?.()
+        cancelMetadata = loadMetadata(loadedPackageNames.split("\n").filter(Boolean), path)
+        if (!initial) await readInstallTimes(false)
+        if (!live(id, path)) return
+        if (!quiet && !installTimesError) onNotice?.(m.targetsRefreshed)
+      }
     } catch (cause) {
       if (live(id, path)) error = cause instanceof Error ? cause.message : m.targetsFailed
     } finally {
-      if (!disposed && sequence === id) { pending = false; saving = false }
+      if (!disposed && sequence === id) { pending = false; saving = false; refreshingPackages = false }
     }
   }
+  async function readTargets() {
+    if (disposed || disabled || !bin || !status || pending || entryBusy || targetReading ||
+        changed() || editor || sheet || transfer || menuOpen || sortMenuOpen) return
+    const path = bin, id = sequence, entryVersion = entrySequence, transferVersion = transferSequence
+    const controller = new AbortController()
+    targetReadController = controller
+    targetReading = true
+    try {
+      const value = await readStatus(path, false, controller.signal)
+      if (!live(id, path) || controller.signal.aborted || pending || changed() || editor || sheet || transfer ||
+          menuOpen || sortMenuOpen || transferSequence !== transferVersion) return
+      if (value.revision !== status.revision || value.config_error !== status.config_error) accept(value, entryVersion)
+      targetReadError = ""
+    } catch (cause) {
+      if (live(id, path) && !controller.signal.aborted) {
+        const message = cause instanceof Error ? cause.message : m.targetsFailed
+        if (message !== targetReadError) onNotice?.(message)
+        targetReadError = message
+      }
+    } finally {
+      if (targetReadController === controller) { targetReadController = undefined; targetReading = false }
+    }
+  }
+  onMount(() => {
+    let timer: ReturnType<typeof setTimeout>
+    let stopped = false
+    const schedule = () => {
+      clearTimeout(timer)
+      if (!stopped && !document.hidden) timer = setTimeout(() => { void readTargets().finally(schedule) }, 5000)
+    }
+    const wake = () => {
+      clearTimeout(timer)
+      if (!document.hidden) void readTargets().finally(schedule)
+      else targetReadController?.abort()
+    }
+    window.addEventListener("focus", wake)
+    document.addEventListener("visibilitychange", wake)
+    schedule()
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+      targetReadController?.abort()
+      window.removeEventListener("focus", wake)
+      document.removeEventListener("visibilitychange", wake)
+    }
+  })
   function canEdit(): boolean {
     return !disposed && !disabled && !pending && ready && !!bin && !!status?.supported && !!status?.backend?.active && !!draft
   }
@@ -471,11 +696,10 @@
       draft.targets = draft.targets.filter(item => item.package_name !== name)
       delete draft.per_app_policy[name]
     }
-    notice = ""
   }
   function selectVisible(enabled: boolean) {
     if (!status || !draft) return
-    const scope = visiblePackages(status, draft, query, filter, sortMetadata, initialSelection ?? undefined, targetSort, showSystemApps)
+    const scope = visible
     const selected = new Map(draft.targets.map(item => [item.package_name, item]))
     const tracked = new Set(draft.system_apps)
     for (const item of scope) {
@@ -491,7 +715,6 @@
     }
     draft.targets = [...selected.values()]
     draft.system_apps = [...tracked]
-    notice = ""
   }
   function addManual() {
     if (!canEdit() || !draft) return
@@ -506,7 +729,6 @@
     if (!canEdit() || !draft || !modes.includes(mode)) return
     const target = draft.targets.find(item => item.package_name === name)
     if (target) target.mode = mode
-    notice = ""
   }
   // Only Tricky Store's formats carry per-app modes and patch policies; TEESimulator
   // and OhMyKeymint store a plain package list.
@@ -520,7 +742,6 @@
     if (value === "") delete policy[key]
     else policy[key] = value
     if (name !== null && Object.keys(policy).length === 0) delete draft.per_app_policy[name]
-    notice = ""
   }
   function canTrackSystem(name: string): boolean {
     return !name.startsWith("uid:") && (!!status?.packages.find(item => item.package_name === name)?.system ||
@@ -530,20 +751,18 @@
     if (!canEdit() || !draft || (enabled && !canTrackSystem(name))) return
     draft.system_apps = draft.system_apps.filter(item => item !== name)
     if (enabled) draft.system_apps.push(name)
-    notice = ""
   }
   function autoAdd(enabled: boolean) {
-    if (canEdit() && draft) { draft.auto_add_new_apps = enabled; notice = "" }
+    if (canEdit() && draft) draft.auto_add_new_apps = enabled
   }
   async function save() {
-    if (!canEdit() || entryBusy || !status || !draft || editor || sheet || !changed()) return
+    if (!canEdit() || entryBusy || !status || !draft || editor || sheet || transfer || !changed()) return
     if (!validDraft(draft)) { error = m.targetsInvalid; return }
     const id = ++sequence, path = bin, entryVersion = entrySequence
     const command = targetSaveCommand(path, status.revision, { ...draft, per_app_policy: supportsAppPolicy() ? draft.per_app_policy : {} })
     pending = true
     saving = true
     error = ""
-    notice = ""
     try {
       const result = await exec(command)
       if (!live(id, path)) return
@@ -554,7 +773,7 @@
       const value = await readStatus(path)
       if (!live(id, path)) return
       accept(value, entryVersion)
-      if (ready) notice = m.targetsSaved
+      if (ready) onNotice?.(m.targetsSaved)
     } catch (cause) {
       if (live(id, path)) error = cause instanceof Error ? cause.message : m.targetsFailed
     } finally {
@@ -575,16 +794,16 @@
     entryBusy = true
     entryReady = false
     entryError = ""
-    entryNotice = ""
     try {
       const value = await readEntry(path)
       if (!entryLive(id, path)) return
       entry = value
       entryReady = true
+      if (value.has_own_webui) onNotice?.(m.targetsOwnWebui)
     } catch (cause) {
       if (entryLive(id, path)) entryError = cause instanceof Error ? cause.message : m.targetsFailed
     } finally {
-      if (!disposed && entrySequence === id) { entryBusy = false; entryNotice = "" }
+      if (!disposed && entrySequence === id) entryBusy = false
     }
   }
   function canManageEntry(enabled: boolean): boolean {
@@ -604,7 +823,6 @@
     const id = ++entrySequence, path = bin
     entryBusy = true
     entryError = ""
-    entryNotice = ""
     entryReady = false
     try {
       const result = await exec(targetEntryCommand(path, enabled))
@@ -617,10 +835,9 @@
       requireSuccess(result)
       try { parseTargetAck(result.stdout) } catch { throw new Error(m.targetsInvalid) }
       if (value.enabled !== enabled || value.linked !== enabled) throw new Error(m.targetsFailed)
-      entryNotice = m.targetsEntryDone
+      onNotice?.(m.targetsEntryDone)
     } catch (cause) {
       if (entryLive(id, path)) {
-        entryNotice = ""
         entryError = cause instanceof Error ? cause.message : m.targetsFailed
       }
     } finally {
@@ -646,7 +863,9 @@
         { value: "system", label: m.targetsSystemApps, icon: ListPlus, blocked: !editable },
         { value: "auto", label: m.targetsAutoAdd, icon: PackagePlus, blocked: !editable },
         { value: "global", label: m.targetsGlobalPolicy, icon: SlidersHorizontal, blocked: !editable || !supportsGlobalPolicy() },
-        { value: "entry", label: m.targetsEntry, icon: Settings2, blocked: disabled || !bin }
+        { value: "entry", label: m.targetsEntry, icon: Settings2, blocked: disabled || !bin },
+        { value: "import", label: transferMessages.import, icon: Import, blocked: !editable || entryBusy },
+        { value: "export", label: transferMessages.export, icon: Download, blocked: !editable || entryBusy }
       ] as option}
         {#if ["manual", "global"].includes(option.value)}<div class="target-menu-divider" role="separator"></div>{/if}
         <button type="button" class="target-menu-item"
@@ -713,12 +932,9 @@
           <span class="skeleton-block ml-auto h-2.5 w-12"></span>
         </div>
       </div>
-      <AppListSkeleton />
     {/if}
     {#if error}<p role="alert" class="whitespace-pre-wrap text-[var(--red)] [overflow-wrap:anywhere]">{error}</p>{/if}
-    {#if installTimesLoading}<p role="status" class="target-notice">{m.loading}</p>{/if}
     {#if installTimesError}<p role="alert" class="target-notice">{installTimesError}</p>{/if}
-    {#if notice && !sheet && !editor}<p role="status" class="target-notice" transition:surface>{notice}</p>{/if}
     {#if status && !status.supported}<p>{m.targetsUnsupported}</p>{/if}
     {#if status?.supported && draft}
       <div class="target-search" use:stickySearch>
@@ -729,8 +945,21 @@
         <span class="shrink-0 text-[11px] tabular-nums text-[var(--muted)]" aria-live="polite">{m.targetsSelected} {draft.targets.length}</span>
       </div>
       </div>
-      {#if ready && sortReady}
-        <VirtualList items={visible} getKey={(item) => item.package_name} estimateSize={68}>
+    {/if}
+    {#if (!status && !error) || (status?.supported && draft)}
+      <div class="target-app-list" use:pullToRefresh>
+      <div class="target-refresh-gap" class:is-pulling={pulling}
+        class:is-armed={pullDistance >= pullThreshold} aria-hidden={!pulling && !refreshingPackages && !installTimesLoading}
+        inert={!pulling && !refreshingPackages && !installTimesLoading}
+        style:height={"calc(var(--refresh-inset) + " + (refreshingPackages || installTimesLoading ? 44 : pullDistance) + "px)"}>
+        <button type="button" class={ui.compactButton} disabled={pending || installTimesLoading}
+          onclick={() => refresh()} aria-label={m.refresh} aria-busy={pending || installTimesLoading}>
+          <RefreshCw size={14} class={pending || installTimesLoading ? "motion-safe:animate-spin" : ""} />
+          {pending || installTimesLoading ? m.loading : m.refresh}
+        </button>
+      </div>
+      {#if status && sortReady}
+        <VirtualList items={visible} getKey={(item) => item.package_name} estimateSize={68} windowScroll={true}>
           {#snippet item(app)}
             <div class="pb-1">
               <AppRow packageName={app.package_name} label={metadata.get(app.package_name)?.label || app.package_name}
@@ -745,7 +974,10 @@
       {:else}
         <AppListSkeleton />
       {/if}
-      {#if ready && sortReady && !visible.length}<p class="page-enter py-4 text-center text-[var(--muted)]">{m.targetsEmpty}</p>{/if}
+      {#if status && sortReady && !visible.length}<p class="page-enter py-4 text-center text-[var(--muted)]">{m.targetsEmpty}</p>{/if}
+      </div>
+    {/if}
+    {#if status?.supported && draft}
       <div class="target-fab-bar">
         <div class="pointer-events-auto flex items-end justify-end">
           {#if dirty}
@@ -764,6 +996,11 @@
     {/if}
   </div>
 </div>
+
+{#if transfer && draft && status}
+  <TargetTransfer mode={transfer} {lang} {draft} {status} {dirty} {onNotice}
+    context={JSON.stringify([bin, status.backend, status.revision])} onclose={closeTransfer} onapply={applyTransfer} />
+{/if}
 
 {#if sheet}
   <Modal title={sheet === "system" ? m.targetsSystemApps : sheet === "global" ? m.targetsGlobalPolicy : sheet === "manual" ? m.targetsManual : m.targetsEntry}
@@ -810,7 +1047,8 @@
           </div>
         </div>
         <button type="button" class="entry-action" class:is-remove={entryReady && entryChecked()}
-          aria-describedby={componentId + "-entry-status"} aria-busy={entryBusy}
+          aria-describedby={componentId + "-entry-status " + componentId + "-entry-hint"} aria-busy={entryBusy}
+          title={dirty ? m.targetsEntrySaveFirst : entry?.has_own_webui ? m.targetsOwnWebui : undefined}
           disabled={entryBusy || (!entryReady ? disabled || !bin : !canManageEntry(!entryChecked()))}
           onclick={() => !entryReady ? refreshEntry() : setEntry(!entryChecked())}>
           <span class="entry-action-icon" aria-hidden="true">
@@ -827,21 +1065,20 @@
           </span>
         </button>
       </div>
-      {#if dirty}<p class="mt-1.5 text-[11px] text-[var(--muted)]">{m.targetsEntrySaveFirst}</p>{/if}
+      <span id={componentId + "-entry-hint"} class="sr-only">{dirty ? m.targetsEntrySaveFirst : entry?.has_own_webui ? m.targetsOwnWebui : ""}</span>
       {#if entryError}<p role="alert" class="mt-2 whitespace-pre-wrap text-[var(--red)]" transition:slide={{ duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 160 }}>{entryError}</p>{/if}
-      {#if entry?.has_own_webui}<p class="mt-1 text-[var(--muted)]">{m.targetsOwnWebui}</p>{/if}
     {/if}
     {#snippet footer(requestClose)}
-      <button type="button" class="{ui.button} min-w-[88px] border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]"
+      <button type="button" class={ui.textButton}
         disabled={pending} onclick={requestClose}>{sheet === "entry" ? m.targetsClose : m.targetsCancel}</button>
       {#if sheet === "system"}
-        <button type="button" class="{ui.button} min-w-[88px] bg-[var(--accent)] text-[var(--accent-ink)]"
+        <button type="button" class={ui.textButton}
           disabled={!editable} onclick={() => { applySystem(false); requestClose() }}>{m.targetsApply}</button>
       {:else if sheet === "global"}
-        <button type="button" class="{ui.button} min-w-[88px] bg-[var(--accent)] text-[var(--accent-ink)]"
+        <button type="button" class={ui.textButton}
           disabled={!editable || !validPolicy(globalPolicy)} onclick={() => { applyGlobal(false); requestClose() }}>{m.targetsApply}</button>
       {:else if sheet === "manual"}
-        <button type="button" class="{ui.button} min-w-[88px] bg-[var(--accent)] text-[var(--accent-ink)]"
+        <button type="button" class={ui.textButton}
           disabled={!editable || !validPackage(manual.trim())} onclick={() => { addManual(); requestClose() }}>{m.targetsAdd}</button>
       {/if}
     {/snippet}
@@ -885,9 +1122,9 @@
       </div>
     {/if}
     {#snippet footer(requestClose)}
-      <button type="button" class="{ui.button} min-w-[88px] border border-[var(--line)] bg-[var(--panel)] hover:enabled:bg-[var(--inset)]"
+      <button type="button" class={ui.textButton}
         disabled={pending} onclick={requestClose}>{m.targetsCancel}</button>
-      <button type="button" class="{ui.button} min-w-[88px] bg-[var(--accent)] text-[var(--accent-ink)]"
+      <button type="button" class={ui.textButton}
         disabled={!editable || !editor || !validPolicy(editor.policy)} onclick={() => { applyEditor(false); requestClose() }}>{m.targetsApply}</button>
     {/snippet}
   </Modal>
@@ -907,6 +1144,13 @@
   </div>
 {/snippet}
 <style>
+  /* Fold the grid gap and search padding into the space above the applications. */
+  .target-app-list { --refresh-inset: calc(.75rem + 4px); min-width: 0; margin-top: calc(-1 * var(--refresh-inset)); overflow-anchor: none; }
+  .target-refresh-gap { display: flex; align-items: center; justify-content: center; overflow: hidden; transition: height 180ms ease-out; }
+  .target-refresh-gap[aria-hidden="true"] { visibility: hidden; }
+  .target-refresh-gap.is-pulling { transition: none; }
+  .target-refresh-gap.is-armed :global(button) { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+  @media (prefers-reduced-motion: reduce) { .target-refresh-gap { transition: none; } }
   .entry-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .entry-status { margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
   .entry-action { position: relative; flex-shrink: 0; min-height: 32px; padding: 4px 10px 4px 24px; border: 1px solid var(--line); border-radius: 6px; background: var(--accent-bg); color: var(--accent); font-size: 12px; transition: background-color 160ms, color 160ms, opacity 160ms, transform 160ms; }

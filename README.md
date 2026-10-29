@@ -172,6 +172,9 @@ per-app policies on modern TS. Saves preserve unknown backend configuration and
 reject stale revisions. Automatic target additions run at boot and apply only to
 newly observed user apps after the initial baseline.
 
+Local XML import and backup recovery preview certificates before installation and always repeat strict validation, including revocation checks, regardless of the automatic-update skip setting.
+App configurations can be exported as JSON and imported with a compatibility/difference preview; confirming an import loads a draft that still requires Save.
+
 The optional WebUI entry creates a link in the active backend's module directory.
 Existing native WebUIs, actions and foreign links are retained. On Magisk, an absent
 Action entry links to `webui.sh`, which opens an installed KSUWebUIStandalone or

@@ -29,6 +29,7 @@ const appSort = load("../src/lib/appSort.ts", { "tiny-pinyin": { default: tinyPi
 const targets = load("../src/lib/targets.ts", { "./appSort": appSort })
 const locale = load("../src/lib/i18n.ts")
 const ui = load("../src/lib/ui.ts")
+const transferMessages = load("../src/lib/targetTransferMessages.ts")
 const plain = value => JSON.parse(JSON.stringify(value))
 const response = value => ({ errno: 0, stdout: JSON.stringify(value), stderr: "" })
 function fixture(overrides = {}) {
@@ -51,26 +52,31 @@ function fixture(overrides = {}) {
 }
 function harness(initial = fixture(), preferences = null) {
   const calls = [], queue = [], effects = [], cleanups = [], confirmations = [], metadataQueue = [], metadataCalls = [], menuChanges = [], titles = []
-  const writes = [], installQueue = [], installReads = []
+  const writes = [], installQueue = [], installReads = [], installKeys = [], notices = []
+  let installInvalidations = 0
   const timers = new Map()
   let focused = 0
   class Element { closest() { return null } }
   const document = { activeElement: null, getElementById: () => ({ focus() { focused++ } }) }
   let current = initial, confirm = true
   const exports = {}
+  // Evaluate derived values lazily; production dependencies stay in the script.
   const script = component.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1]
+    .replace(/^  let (\w+) = \$derived\((.+)\)$/gm, (_, name, expression) =>
+      `Object.defineProperty(globalThis, "${name}", { get: () => (${expression}) })`)
   runInNewContext(transpile(script + `
     export const handlers = {
-      setSort, toggleSystemVisibility, refreshEntry, entryChecked, entryStateLabel, canManageEntry, canLeave, refresh, save, setEntry, select, selectVisible, setMode, setPolicy, trackSystem, autoAdd, addManual, beforeUnload,
+      setSort, toggleSystemVisibility, refreshEntry, entryChecked, entryStateLabel, canManageEntry, canLeave, refresh, readTargets, save, setEntry, select, selectVisible, setMode, setPolicy, trackSystem, autoAdd, addManual, beforeUnload,
       openEditor, closeEditor, applyEditor, editPolicy, countChanges, sheetChanged,
       toggleMenu, closeMenu, dismissMenu, menuKeydown, menuAction, openSheet, closeSheet, toggleSystem, applySystem, discard, loadMetadata,
+      openTransfer, closeTransfer, applyTransfer,
       bindMenu: node => { menuElement = node },
       editorMode: mode => { editor.mode = mode },
       editorTracked: value => { editor.tracked = value },
-      state: () => ({ status, draft, baseline, ready, entryReady, entry, entryBusy, entryError, entryNotice, saving, pending, error, notice, editor, menuOpen, sheet, systemDraft, metadata, targetSort, requestedSort, sortReady, installTimes, installTimesLoading, installTimesError, showSystemApps, dirty: changed() }),
-      display: () => status && draft ? visiblePackages(status, draft, query, filter, new Map([...status.packages, ...draft.targets].map(item => [item.package_name, { label: metadata.get(item.package_name)?.label || item.package_name, installedAt: installTimes.get(item.package_name) }])), initialSelection ?? undefined, targetSort, showSystemApps) : [],
+      state: () => ({ status, draft, baseline, ready, entryReady, entry, entryBusy, entryError, saving, pending, error, editor, menuOpen, sheet, transfer, systemDraft, metadata, targetSort, requestedSort, sortReady, installTimes, installTimesLoading, installTimesError, showSystemApps, dirty: changed() }),
+      display: () => visible,
       search: (text, kind = "all") => { query = text; filter = kind },
-      // Mirror the component: rows are ordered by the selection captured on first load.
+      // Exercise the omitted-sort API used by the system dialog as well.
       visible: () => status && draft ? visiblePackages(status, draft, query, filter, metadata, initialSelection ?? undefined) : [],
       listed: () => status && draft ? visiblePackages(status, draft, query, "listed", metadata, initialSelection ?? undefined) : [],
       manual: (text, mode = "auto") => { manual = text; manualMode = mode; addManual() },
@@ -79,22 +85,29 @@ function harness(initial = fixture(), preferences = null) {
   `), {
     exports,
     require(name) {
-      if (name === "svelte") return { onDestroy: fn => cleanups.push(fn), untrack: fn => fn() }
+      if (name === "svelte") return { onMount() {}, onDestroy: fn => cleanups.push(fn), untrack: fn => fn(), tick: () => Promise.resolve() }
       if (name === "../bridge") return { exec(command) {
         calls.push(command)
-        return queue.length ? Promise.resolve(queue.shift()) : Promise.resolve(response(command.endsWith(" targets entry status") ? current.entry : current))
+        if (queue.length) return Promise.resolve(queue.shift())
+        const value = command.endsWith(" targets entry status") ? current.entry : command.endsWith(" targets packages") ? current.packages : { ...current }
+        if (command.endsWith(" targets status --config-only")) delete value.packages
+        return Promise.resolve(response(value))
       } }
-      if (name === "../installTimes") return { readInstallTimes(signal) { installReads.push(signal); return installQueue.length ? installQueue.shift() : Promise.resolve(new Map()) } }
+      if (name === "../installTimes") return {
+        cachedInstallTimes(context, names, signal) { installKeys.push([context, names]); installReads.push(signal); return installQueue.length ? installQueue.shift() : Promise.resolve(new Map(names.split("\n").filter(Boolean).map(name => [name, 0]))) },
+        invalidateInstallTimes() { installInvalidations++ },
+      }
       if (name === "../i18n") return locale
       if (name === "../targets") return targets
       if (name === "../ui") return ui
+      if (name === "../targetTransferMessages") return transferMessages
       if (name === "../apps") return { packagesInfo(names, signal, onBatch) { metadataCalls.push({ names, signal, onBatch }); return metadataQueue.length ? metadataQueue.shift() : Promise.resolve(new Map()) } }
       if (name === "../stickySearch") return { stickySearch() {} }
       if (name === "../motion") return { surface: () => ({}), reveal: () => ({}), pageExit: () => ({}) }
       if (name === "./AppListSkeleton.svelte") return {}
       throw new Error(name)
     },
-    $props: Object.assign(() => ({ bin: "/module/bin/keybox", lang: "en", onMenuChange: value => menuChanges.push(value), onTitleChange: value => titles.push(value) }), { id: () => "harness" }),
+    $props: Object.assign(() => ({ bin: "/module/bin/keybox", lang: "en", onMenuChange: value => menuChanges.push(value), onTitleChange: value => titles.push(value), onNotice: value => notices.push(value) }), { id: () => "harness" }),
     AbortController, Element, document,
     localStorage: { getItem: () => preferences, setItem: (key, value) => writes.push([key, value]) },
     setTimeout: fn => { const id = {}; timers.set(id, fn); return id },
@@ -106,7 +119,8 @@ function harness(initial = fixture(), preferences = null) {
   })
   const h = exports.handlers
   return {
-    ...h, writes, calls, confirmations, installReads,
+    ...h, writes, calls, confirmations, installReads, installKeys, notices,
+    installInvalidations: () => installInvalidations,
     installResult: value => installQueue.push(value), metadataCalls, menuChanges, titles, Element, document,
     metadataResult: value => metadataQueue.push(value),
     expireMetadata: () => { for (const fn of [...timers.values()]) fn(); timers.clear() },
@@ -120,6 +134,87 @@ function harness(initial = fixture(), preferences = null) {
   }
 }
 
+test("transfer preview cancellation preserves draft/preferences and confirmation only loads a revision-protected draft", async () => {
+  const h = harness()
+  await h.refresh(false)
+  const before = JSON.stringify(h.state().draft), baseline = h.state().baseline
+  const calls = h.calls.length
+  await h.openTransfer("import")
+  assert.equal(h.state().transfer, "import")
+  h.closeTransfer()
+  assert.equal(JSON.stringify(h.state().draft), before)
+  assert.equal(h.writes.length, 0)
+  const imported = plain(h.state().draft)
+  imported.targets = [{ package_name: "com.beta", mode: "generate" }, { package_name: "com.alpha", mode: "hack" }]
+  await h.openTransfer("import")
+  assert.equal(h.applyTransfer(imported), true)
+  assert.equal(h.calls.length, calls)
+  assert.equal(h.state().baseline, baseline)
+  assert.equal(h.state().status.revision, "revision-1")
+  assert.equal(h.state().dirty, true)
+  const event = { preventDefault() { this.prevented = true } }
+  h.beforeUnload(event)
+  assert.equal(event.prevented, true)
+  await h.save()
+  assert.equal(h.calls.length, calls, "Save cannot run through the open import modal")
+  h.closeTransfer()
+  h.queue({ errno: 1, stdout: "", stderr: "revision conflict; refresh status and retry" })
+  await h.save()
+  assert.equal(h.state().error, "revision conflict; refresh status and retry")
+  assert.deepEqual(plain(h.state().draft), imported)
+  assert.equal(h.state().dirty, true)
+  assert.ok(h.calls.at(-1).includes('"revision":"revision-1"'))
+  assert.equal(h.writes.length, 0)
+})
+
+test("transfer opening respects unapplied editor/sheet guards and stale opening contexts", async () => {
+  const h = harness()
+  await h.refresh(false)
+  h.openEditor("com.alpha")
+  h.editorMode("hack")
+  h.confirm(false)
+  await h.openTransfer("import")
+  assert.equal(h.state().transfer, null)
+  assert.equal(h.state().editor.mode, "hack")
+  h.confirm(true)
+  await h.openTransfer("import")
+  assert.equal(h.state().editor, null)
+  assert.equal(h.state().draft.targets[0].mode, "auto")
+  h.closeTransfer()
+  h.openSheet("system")
+  h.toggleSystem("com.system")
+  h.confirm(false)
+  await h.openTransfer("export")
+  assert.equal(h.state().sheet, "system")
+  assert.equal(h.state().transfer, null)
+  h.confirm(true)
+  await h.openTransfer("export")
+  assert.equal(h.state().sheet, null)
+  assert.deepEqual(plain(h.state().draft.system_apps), [])
+  h.closeTransfer()
+  const opening = h.openTransfer("import")
+  h.context("/other/bin")
+  await opening
+  assert.equal(h.state().transfer, null)
+})
+
+test("leaving, disabling and switching bin dismiss transfers without touching the draft", async () => {
+  for (const action of ["leave", "disabled", "bin"]) {
+    const h = harness()
+    await h.refresh(false)
+    await h.openTransfer("import")
+    if (action === "leave") assert.equal(h.canLeave(), true)
+    else {
+      h.context(action === "bin" ? "/other/bin" : "/module/bin/keybox", action === "disabled")
+      h.effect()
+    }
+    assert.equal(h.state().transfer, null)
+    assert.equal(h.applyTransfer(plain(draftFromFixture())), false)
+    h.dispose()
+  }
+  function draftFromFixture() { const value = fixture(); return { ...value.config, system_apps: value.system_apps, auto_add_new_apps: value.auto_add_new_apps } }
+})
+
 test("detected backend metadata determines page titles, with safe identity and absent-backend fallbacks", async () => {
   for (const [identity, expected] of [["TS", "Tricky Store"], ["TS-L", "Tricky Store"], ["TEES-RS", "TEESimulator-RS"], ["TEES", "TEESimulator"], ["OMK", "OhMyKeymint"]]) {
     const initial = fixture({ backend: { backend: "detected-kind", identity, active: true, version: "9.1" } })
@@ -128,10 +223,10 @@ test("detected backend metadata determines page titles, with safe identity and a
     await h.refresh(false)
     assert.equal(h.titles.at(-1), expected)
     h.status({ ...initial, backend: { ...initial.backend, name: " Installed fork " }, revision: "next" })
-    await h.refresh(false)
+    await h.readTargets()
     assert.equal(h.titles.at(-1), "Installed fork")
     h.status({ ...initial, backend: null, supported: false, revision: "absent" })
-    await h.refresh(false)
+    await h.readTargets()
     assert.equal(h.titles.at(-1), locale.messages.en.targetsTitle)
   }
   assert.equal(targets.targetBackendTitle({ identity: "constructor" }, "Targets"), "Targets")
@@ -183,6 +278,7 @@ test("shell command sends exact JSON on stdin with quotes, substitutions and new
     assert.deepEqual(JSON.parse(result.stdout), { revision, ...plain(draft) })
     assert.equal(existsSync(marker), false)
     assert.equal(targets.targetStatusCommand("/a'b"), "'/a'\"'\"'b' targets status")
+    assert.equal(targets.targetStatusCommand("/a'b", true), "'/a'\"'\"'b' targets status --config-only")
     assert.throws(() => targets.shellQuote("a\0b"))
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
@@ -198,7 +294,7 @@ test("standalone page loads automatically once its context is available", async 
   assert.equal(h.calls.length, 1)
   assert.equal(h.calls[0], "'/module/bin/keybox' targets status")
   assert.equal(h.state().ready, true)
-  assert.equal(h.state().notice, "")
+  assert.equal(h.notices.includes(locale.messages.en.targetsSaved), false)
   h.effect()
   assert.equal(h.calls.length, 1)
 })
@@ -231,13 +327,18 @@ test("save carries all modes, policies, inherited blanks, system tracking and re
   const fresh = fixture({ revision: "revision-2", config: {
     targets: expected.targets, default_policy: expected.default_policy, per_app_policy: expected.per_app_policy,
   }, system_apps: expected.system_apps, auto_add_new_apps: true })
+  delete fresh.packages
+  const packages = h.state().status.packages, metadataReads = h.metadataCalls.length, installReads = h.installReads.length
   h.queue(response({ ok: true }), response(fresh))
   await h.save()
   assert.equal(h.calls[1], targets.targetSaveCommand("/module/bin/keybox", "revision-1", expected))
-  assert.equal(h.calls[2], targets.targetStatusCommand("/module/bin/keybox"))
+  assert.equal(h.calls[2], targets.targetStatusCommand("/module/bin/keybox", true))
   assert.equal(h.state().dirty, false)
   assert.equal(h.state().status.revision, "revision-2")
-  assert.equal(h.state().notice, locale.messages.en.targetsSaved)
+  assert.equal(h.state().status.packages, packages)
+  assert.equal(h.metadataCalls.length, metadataReads)
+  assert.equal(h.installReads.length, installReads)
+  assert.equal(h.notices.at(-1), locale.messages.en.targetsSaved)
 })
 
 test("search and user/system filters bound bulk selection and clearing to visible apps", async () => {
@@ -265,7 +366,7 @@ test("search and user/system filters bound bulk selection and clearing to visibl
   assert.equal(h.state().error, locale.messages.en.targetsInvalid)
 })
 
-test("failed save keeps edits and permits retry; failed load keeps edits and blocks saving", async () => {
+test("failed save and package refresh keep edits and permit retry", async () => {
   const h = harness()
   await h.refresh(false)
   h.setPolicy(null, "os_patch", "202602")
@@ -279,11 +380,16 @@ test("failed save keeps edits and permits retry; failed load keeps edits and blo
   assert.equal(h.state().ready, true)
   h.queue({ errno: 0, stdout: "not JSON", stderr: "" })
   await h.refresh(false)
-  assert.equal(h.state().ready, false)
+  assert.equal(h.state().ready, true)
   assert.deepEqual(plain(h.state().draft), draft)
+  assert.equal(h.state().error, locale.messages.en.targetsInvalid)
   const calls = h.calls.length
+  h.queue(response({ ok: true }), response(fixture({ revision: "saved", config: {
+    targets: draft.targets, default_policy: draft.default_policy, per_app_policy: draft.per_app_policy,
+  }, system_apps: draft.system_apps, auto_add_new_apps: draft.auto_add_new_apps })))
   await h.save()
-  assert.equal(h.calls.length, calls)
+  assert.equal(h.calls.length, calls + 2)
+  assert.equal(h.state().dirty, false)
 })
 
 test("malformed acknowledgement, bridge failure and failed post-save reload cannot report completion", async () => {
@@ -299,7 +405,7 @@ test("malformed acknowledgement, bridge failure and failed post-save reload cann
     h.queue(result)
     await h.save()
     assert.ok(h.state().error)
-    assert.equal(h.state().notice, "")
+    assert.equal(h.notices.includes(locale.messages.en.targetsSaved), false)
     assert.equal(h.state().dirty, true)
     assert.deepEqual(plain(h.state().draft), draft)
     assert.equal(h.calls.length, 2)
@@ -327,23 +433,38 @@ test("status config/package errors disable target mutations and save", async () 
   }
 })
 
-test("unsaved refresh asks before discarding and beforeunload protects navigation", async () => {
+test("unsaved refresh preserves draft and revision without confirmation and beforeunload protects navigation", async () => {
   const h = harness()
   await h.refresh(false)
   h.autoAdd(true)
+  const draft = h.state().draft, baseline = h.state().baseline
+  const fresh = fixture({ revision: "external-revision" })
+  fresh.packages.push({ package_name: "com.new", system: false, selected: false, mode: "auto", installed: true })
+  h.status(fresh)
   h.confirm(false)
   await h.refresh()
-  assert.equal(h.calls.length, 1)
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.calls.at(-1), targets.targetPackagesCommand("/module/bin/keybox"))
+  assert.equal(h.state().draft, draft)
+  assert.equal(h.state().baseline, baseline)
+  assert.equal(h.state().status.revision, "revision-1")
+  assert.equal(h.state().status.packages.some(item => item.package_name === "com.new"), true)
   assert.equal(h.state().dirty, true)
-  assert.equal(h.confirmations.length, 1)
+  assert.equal(h.confirmations.length, 0)
+  assert.equal(h.installReads.length, 1, "refresh reads installation times even when sorting by name")
+  assert.equal(h.metadataCalls.length, 2)
+  await h.readTargets()
+  assert.equal(h.calls.length, 2, "automatic config reads skip a dirty draft")
   let prevented = false
   const event = { preventDefault() { prevented = true } }
   h.beforeUnload(event)
   assert.equal(prevented, true)
   assert.equal(event.returnValue, "")
-  h.confirm(true)
   await h.refresh()
-  assert.equal(h.state().dirty, false)
+  assert.equal(h.state().draft, draft)
+  assert.equal(h.state().status.revision, "revision-1")
+  assert.equal(h.state().dirty, true)
+  assert.equal(h.confirmations.length, 0)
 })
 
 test("leaving confirms dirty edits, blocks pending load/save/entry and recovers after completion", async () => {
@@ -352,7 +473,7 @@ test("leaving confirms dirty edits, blocks pending load/save/entry and recovers 
   h.queue(new Promise(resolve => { finishLoad = resolve }))
   const loading = h.refresh(false)
   assert.equal(h.canLeave(), false)
-  assert.equal(h.state().notice, locale.messages.en.targetsPending)
+  assert.equal(h.notices.at(-1), locale.messages.en.targetsPending)
   assert.equal(h.confirmations.length, 0)
   finishLoad(response(fixture()))
   await loading
@@ -403,7 +524,7 @@ test("pending jobs exclude duplicate operations, stale paths and disabled parent
       assert.equal(h.calls.length, 2) // The new page context loads automatically.
     } else {
       assert.equal(h.state().status, null)
-      assert.equal(h.state().notice, "")
+      assert.equal(h.notices.includes(locale.messages.en.targetsSaved), false)
     }
     if (end !== "destroy") assert.equal(h.state().pending, false)
   }
@@ -434,7 +555,7 @@ test("entry switches on then off its linked entry and operates on OMK/TEES witho
     await h.setEntry(true)
     assert.equal(h.calls[1], "'/module/bin/keybox' targets entry set on")
     assert.equal(h.state().entry.linked, true)
-    assert.equal(h.state().entryNotice, locale.messages.en.targetsEntryDone)
+    assert.equal(h.notices.at(-1), locale.messages.en.targetsEntryDone)
     h.queue(response({ ok: true }), response(initial.entry))
     await h.setEntry(false)
     assert.equal(h.calls[3], "'/module/bin/keybox' targets entry set off")
@@ -459,7 +580,7 @@ test("entry conflicts block enabling, allow disabling, protect edits and surface
   h.autoAdd(true)
   await h.setEntry(true)
   assert.equal(h.calls.length, 1)
-  await h.refresh(false)
+  h.discard()
   h.queue({ errno: 1, stdout: '{"ok":true}', stderr: "entry conflict" })
   await h.setEntry(true)
   assert.match(h.state().entryError, /entry conflict/)
@@ -500,7 +621,7 @@ test("entry cleanup survives inactive or missing backends and config/package err
     await h.setEntry(false)
     assert.equal(h.calls[1], "'/module/bin/keybox' targets entry set off")
     assert.equal(h.state().entry.enabled, false)
-    assert.equal(h.state().entryNotice, locale.messages.en.targetsEntryDone)
+    assert.equal(h.notices.at(-1), locale.messages.en.targetsEntryDone)
   }
 })
 
@@ -531,7 +652,7 @@ test("entry failures reload partial changes and never optimistically toggle the 
   await off
   assert.equal(h.entryChecked(), true)
   assert.match(h.state().entryError, /unlink denied/)
-  assert.equal(h.state().entryNotice, "")
+  assert.equal(h.notices.includes(locale.messages.en.targetsEntryDone), false)
   // A command can fail after removing the links but before persisting the setting.
   const partial = { ...initial, entry: { ...initial.entry, linked: false } }
   h.queue({ errno: 1, stdout: "", stderr: "state write failed" }, response(partial.entry))
@@ -551,13 +672,13 @@ test("entry acknowledgement must match real links and an unreadable reload marks
   await h.setEntry(false)
   assert.equal(h.entryChecked(), true)
   assert.ok(h.state().entryError)
-  assert.equal(h.state().entryNotice, "")
+  assert.equal(h.notices.includes(locale.messages.en.targetsEntryDone), false)
   h.queue(response({ ok: true }), { errno: 1, stdout: "", stderr: "read failed" })
   await h.setEntry(false)
   assert.equal(h.state().entryReady, false)
   assert.equal(h.entryStateLabel(), locale.messages.en.targetsEntryUnknown)
   assert.equal(h.canManageEntry(false), false)
-  assert.equal(h.state().entryNotice, "")
+  assert.equal(h.notices.includes(locale.messages.en.targetsEntryDone), false)
   await h.refreshEntry()
   assert.equal(h.entryChecked(), false)
   assert.equal(h.canManageEntry(true), true)
@@ -607,7 +728,7 @@ test("stale save completion and failed entry reload cannot overwrite state or cl
   h.queue(response({ ok: true }), response(fixture().entry)) // Entry remains off despite successful command exit.
   await h.setEntry(true)
   assert.ok(h.state().entryError)
-  assert.equal(h.state().entryNotice, "")
+  assert.equal(h.notices.includes(locale.messages.en.targetsEntryDone), false)
   assert.equal(h.state().ready, true)
 })
 
@@ -745,7 +866,7 @@ test("the selection captured on first load keeps draft toggles and reloads from 
   await h.save()
   assert.deepEqual(names(), ["com.system", "com.zulu", "com.alpha", "com.beta"])
   await h.refresh()
-  assert.equal(h.state().notice, locale.messages.en.targetsRefreshed)
+  assert.equal(h.notices.at(-1), locale.messages.en.targetsRefreshed)
 })
 
 
@@ -813,6 +934,60 @@ test("menu callback, trigger exclusion, keyboard focus, outside dismissal and ac
   assert.equal(h.state().draft.auto_add_new_apps, true)
 })
 
+test("initial and explicit refresh load metadata while save readback retains the current metadata", async () => {
+  const h = harness()
+  let finish
+  h.queue(new Promise(resolve => { finish = resolve }))
+  const loading = h.refresh(false)
+  assert.equal(h.metadataCalls.length, 0)
+  finish(response(fixture()))
+  await loading
+  assert.equal(h.metadataCalls.length, 1)
+  h.installResult(Promise.resolve(new Map([["com.alpha", 20], ["com.beta", 10]])))
+  await h.setSort("installed")
+  const times = h.state().installTimes, invalidations = h.installInvalidations()
+  h.search("alpha")
+  h.select("com.beta", true)
+  h.manual("com.manual", "auto")
+  await h.refreshEntry()
+  h.effect()
+  assert.equal(h.metadataCalls.length, 1, "entry reads and draft/search changes do not schedule metadata")
+  h.queue(response({ ok: true }), response(fixture({ revision: "saved", packages: undefined })))
+  await h.save()
+  h.effect()
+  assert.equal(h.metadataCalls.length, 1, "save readback preserves application metadata")
+  assert.equal(h.installReads.length, 1, "draft and save changes reuse the loaded installation dates")
+  assert.equal(h.installInvalidations(), invalidations)
+  assert.equal(h.state().installTimes, times)
+  await h.refresh(false)
+  assert.equal(h.metadataCalls.length, 2, "explicit refresh schedules a fresh metadata pass")
+})
+
+test("failed, invalid and stale list reads do not schedule metadata", async () => {
+  for (const result of [
+    { errno: 1, stdout: "", stderr: "read failed" },
+    { errno: 0, stdout: "invalid", stderr: "" },
+    response(fixture({ config_error: "bad config" })),
+    response(fixture({ packages_error: "bad packages" })),
+  ]) {
+    const h = harness()
+    await h.refresh(false)
+    h.queue(result)
+    await h.refresh(false)
+    assert.equal(h.metadataCalls.length, 1)
+  }
+  const h = harness()
+  await h.refresh(false)
+  let finish
+  h.queue(new Promise(resolve => { finish = resolve }))
+  const loading = h.refresh(false)
+  h.context("/module/bin/keybox", true)
+  h.effect()
+  finish(response(fixture({ revision: "late" })))
+  await loading
+  assert.equal(h.metadataCalls.length, 1)
+})
+
 test("metadata searches labels and ignores errors, timed out responses, stale contexts and unmounted results", async () => {
   const h = harness()
   await h.refresh(false)
@@ -844,7 +1019,7 @@ test("metadata searches labels and ignores errors, timed out responses, stale co
     assert.equal(current.state().metadata.size, 0)
     assert.equal(current.state().ready, true)
     cleanup()
-    assert.equal(current.metadataCalls[0].signal.aborted, true)
+    assert.equal(current.metadataCalls.at(-1).signal.aborted, true)
     assert.equal(current.timerCount(), 0)
   }
 })
@@ -899,7 +1074,7 @@ test("entry refresh preserves dirty draft, metadata, editor and list messages", 
   assert.deepEqual(plain(h.state().editor), editor)
   assert.equal(h.state().baseline, before.baseline)
   assert.equal(h.state().metadata, before.metadata)
-  assert.equal(h.state().notice, before.notice)
+  assert.equal(h.notices.at(-1), locale.messages.en.targetsPending)
   assert.equal(h.state().error, before.error)
   assert.equal(h.state().dirty, true)
   assert.equal(h.calls.at(-1), "'/module/bin/keybox' targets entry status")
@@ -923,7 +1098,7 @@ test("entry reads and operations reject late contexts, disable and destroy resul
       await running
       await new Promise(resolve => setImmediate(resolve))
       assert.equal(h.entryChecked(), false)
-      assert.equal(h.state().entryNotice, "")
+      assert.equal(h.notices.includes(locale.messages.en.targetsEntryDone), false)
       assert.equal(h.calls.filter(command => command.endsWith("entry status")).length, operation === "refreshEntry" ? 1 : 0)
     }
   }
@@ -974,7 +1149,7 @@ test("save and entry writes exclude each other without conflating their busy sta
 
 test("package rows are available before metadata completion and batches obey cancellation guards", async () => {
   assert.doesNotMatch(component, /catalogReady/)
-  assert.match(component, /\{#if ready && sortReady\}\s*<VirtualList/)
+  assert.match(component, /\{#if status && sortReady\}\s*<VirtualList/)
   for (const end of ["timeout", "path", "disabled", "destroy", "cleanup"]) {
     const h = harness()
     await h.refresh(false)
@@ -985,18 +1160,18 @@ test("package rows are available before metadata completion and batches obey can
     assert.ok(h.visible().length > 0)
     assert.equal(h.state().metadata.size, 0)
     const batch = new Map([["com.alpha", { label: "First batch", icon: null }]])
-    h.metadataCalls[0].onBatch(batch)
-    assert.equal(h.state().metadata, batch)
+    h.metadataCalls.at(-1).onBatch(batch)
+    assert.equal(h.state().metadata.get("com.alpha").label, batch.get("com.alpha").label)
     if (end === "timeout") h.expireMetadata()
     if (end === "path") h.context("/other/bin")
     if (end === "disabled") h.context("/module/bin/keybox", true)
     if (end === "destroy") h.dispose()
     if (end === "cleanup") cleanup()
     const late = new Map([["com.alpha", { label: "Late", icon: null }]])
-    h.metadataCalls[0].onBatch(late)
+    h.metadataCalls.at(-1).onBatch(late)
     finish(late)
     await new Promise(resolve => setImmediate(resolve))
-    assert.equal(h.state().metadata, batch)
+    assert.equal(h.state().metadata.get("com.alpha").label, batch.get("com.alpha").label)
     cleanup()
     assert.equal(h.timerCount(), 0)
   }
@@ -1019,7 +1194,7 @@ test("entry write readback preserves edits made in flight and ignores a late rea
     assert.equal(h.state().draft.targets[0].mode, "hack")
     assert.equal(h.state().dirty, true)
     assert.equal(h.entryChecked(), !stale)
-    assert.equal(h.state().entryNotice, stale ? "" : locale.messages.en.targetsEntryDone)
+    assert.equal(h.notices.includes(locale.messages.en.targetsEntryDone), !stale)
     assert.equal(h.calls.length, 3)
   }
 })
@@ -1035,21 +1210,24 @@ test("list refresh finishes independently while the entry dialog is reading", as
   assert.equal(h.state().ready, true)
   assert.equal(h.state().entryBusy, true)
   assert.equal(h.state().sheet, "entry")
-  assert.equal(h.state().entryNotice, "")
+  assert.equal(h.notices.includes(locale.messages.en.targetsEntryDone), false)
   finishEntry(response(fixture().entry))
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(h.state().entryBusy, false)
-  assert.equal(h.state().notice, locale.messages.en.targetsRefreshed)
-  assert.equal(h.calls.filter(command => command.endsWith(" targets status")).length, 2)
+  assert.equal(h.notices.at(-1), locale.messages.en.targetsRefreshed)
+  assert.equal(h.calls.filter(command => command.endsWith(" targets status")).length, 1)
+  assert.equal(h.calls.filter(command => command.endsWith(" targets packages")).length, 1)
   assert.equal(h.calls.filter(command => command.endsWith(" targets entry status")).length, 1)
 })
 
-test("full refresh synchronizes entry only when no independent entry request intervenes", async () => {
+test("package refresh preserves entry until its independent status read completes", async () => {
   const h = harness()
   await h.refresh(false)
   const linked = { ...fixture().entry, enabled: true, linked: true }
   h.status(fixture({ entry: linked }))
   await h.refresh(false)
+  assert.equal(h.entryChecked(), false)
+  await h.refreshEntry()
   assert.equal(h.entryChecked(), true)
   let finish
   h.queue(new Promise(resolve => { finish = resolve }))
@@ -1160,4 +1338,99 @@ test("restored recent-install preference waits for its data before exposing the 
   assert.equal(h.state().sortReady, true)
   assert.equal(h.state().targetSort, "installed")
   assert.deepEqual(plain(h.display()).map(app => app.package_name), ["com.beta", "com.alpha"])
+})
+
+test("active refresh invalidates installation dates even when package names stay the same", async () => {
+  const h = harness()
+  await h.refresh(false)
+  h.effect()
+  h.installResult(Promise.resolve(new Map([["com.alpha", 20], ["com.beta", 10]])))
+  await h.setSort("installed")
+  const before = h.installInvalidations()
+  let finish
+  h.installResult(new Promise(resolve => { finish = resolve }))
+  const refreshing = h.refresh()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.ok(h.installInvalidations() > before)
+  h.effect()
+  assert.equal(h.state().targetSort, "installed")
+  assert.deepEqual(plain(h.display()).map(app => app.package_name), ["com.alpha", "com.beta"])
+  assert.deepEqual(h.installKeys[1], h.installKeys[0], "a refresh must bypass a still-fresh cache with the same key")
+  finish(new Map([["com.beta", 30], ["com.alpha", 20]]))
+  await refreshing
+  assert.deepEqual(plain(h.display()).map(app => app.package_name), ["com.beta", "com.alpha"])
+
+  const failing = h.refresh()
+  h.installResult(Promise.reject(Error("refresh failed")))
+  await failing
+  h.effect()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(h.state().targetSort, "installed")
+  assert.equal(h.state().installTimesError, locale.messages.en.targetsInstallTimeFailed)
+  assert.deepEqual(plain(h.display()).map(app => app.package_name), ["com.beta", "com.alpha"])
+  const reads = h.installReads.length
+  h.effect()
+  assert.equal(h.installReads.length, reads, "failed refreshes do not spin in an automatic retry loop")
+})
+
+test("backend, package set and bin changes invalidate dates and reject an older pending result", async () => {
+  for (const change of ["backend", "packages", "bin"]) {
+    const h = harness()
+    await h.refresh(false)
+    h.effect()
+    let finish
+    h.installResult(new Promise(resolve => { finish = resolve }))
+    const old = h.setSort("installed")
+    const before = h.installInvalidations()
+    const next = fixture({ revision: "next" })
+    if (change === "backend") next.backend.version = "new"
+    if (change === "packages") next.packages.push({ package_name: "com.new", mode: "auto", selected: false, system: false, installed: true })
+    h.status(next)
+    if (change === "bin") {
+      h.context("/new/bin")
+      h.effect()
+      await new Promise(resolve => setImmediate(resolve))
+    } else {
+      if (change === "backend") await h.readTargets()
+      h.installResult(Promise.resolve(new Map([["com.beta", 30], ["com.alpha", 20]])))
+      await h.refresh(false, true)
+      h.effect()
+    }
+    finish(new Map([["com.alpha", 999]]))
+    await old
+    await new Promise(resolve => setImmediate(resolve))
+    assert.ok(h.installInvalidations() > before, change)
+    if (change === "bin") {
+      // A path change preserves the previously applied sort (name) while the
+      // pending uncommitted installed choice is cancelled.
+      assert.equal(h.state().targetSort, "name")
+    } else {
+      assert.equal(h.installReads[0].aborted, true, change)
+      assert.equal(h.state().targetSort, "name", "refresh keeps the applied sort while cancelling the pending choice")
+      assert.equal(h.state().installTimes.get("com.alpha"), 20, change)
+      assert.notDeepEqual(h.installKeys[1], h.installKeys[0], change)
+    }
+  }
+})
+
+test("manual missing packages and UID keep current modes and canonical multi-user dates", async () => {
+  const h = harness()
+  await h.refresh(false)
+  h.manual("com.alpha@010", "generate")
+  h.manual("uid:10002", "hack")
+  h.installResult(Promise.resolve(new Map([["com.alpha@10", 30], ["com.alpha", 20], ["com.beta", 10]])))
+  await h.setSort("installed")
+  const rows = plain(h.display())
+  assert.deepEqual(rows.map(row => row.package_name), ["com.alpha@010", "com.alpha", "com.beta", "uid:10002"])
+  assert.equal(rows[0].mode, "generate")
+  assert.equal(rows[0].installed, false)
+  assert.equal(rows.at(-1).mode, "hack")
+  const uid = harness(fixture({
+    config: { targets: [{ package_name: "uid:10002", mode: "hack" }], default_policy: {}, per_app_policy: {} },
+    packages: [],
+  }))
+  await uid.refresh(false)
+  await uid.setSort("installed")
+  assert.equal(uid.installReads.length, 0)
+  assert.equal(uid.state().targetSort, "installed")
 })

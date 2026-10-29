@@ -16,6 +16,9 @@
   import { ui } from "./lib/ui"
   import CertificateDetails from "./lib/components/CertificateDetails.svelte"
   import TargetManager from "./lib/components/TargetManager.svelte"
+  import KeyboxFiles from "./lib/components/KeyboxFiles.svelte"
+  import { keyboxFilesMessages } from "./lib/keyboxFilesMessages"
+  import { isImportId, isBackupId, KeyboxFilesError } from "./lib/keyboxFiles"
   import { targetBackendTitle } from "./lib/targets"
   import Toast from "./lib/components/Toast.svelte"
   import { parseCertificateStatus, certificateStatusForSerial, type CertificateVerification, type CertificateValidity, type ValidityStatus } from "./lib/certificateStatus"
@@ -117,7 +120,7 @@
   // waiting budget, not a total backend deadline. Neither timeout cancels the job.
   const VERIFY_TIMEOUT = 30 * 60_000
   const UPDATE_TIMEOUT = 75 * 60_000
-  type Busy = "update" | "check" | "refresh" | "settings"
+  type Busy = "update" | "check" | "refresh" | "settings" | "local"
   type Schedule = "off" | "daily" | "weekly"
   type KeyboxSource = "auto" | "meow" | "spectre"
   const keyboxSources: KeyboxSource[] = ["auto", "meow", "spectre"]
@@ -188,6 +191,7 @@
     certificateVerification = null
   }
   let busy = $state<Busy | null>(null)
+  let localOperation = $state<"install" | "restore" | null>(null)
   let cancelling = $state(false)
   let cancelRequested = $state(false)
   let updateRunning = $state(false)
@@ -202,6 +206,7 @@
   let outputLines = $state.raw<LogLine[]>([])
 
   function setOutput(text: string, append = false) {
+    if (append ? !text : text === logBuffer.text) return
     if (append) logBuffer.append(text)
     else logBuffer.replace(text)
     output = logBuffer.text
@@ -452,6 +457,48 @@
     })
   }
 
+  async function installKeyboxFile(operation: "install" | "restore", id: string, revision: string): Promise<void> {
+    const local = keyboxFilesMessages(lang)
+    const rejected = operation === "restore" ? local.restoreFailed : local.installFailed
+    if (!moddir || busy !== null || disposed || !["install", "restore"].includes(operation) ||
+        !(operation === "install" ? isImportId(id) : isBackupId(id)) || !/^[a-f0-9]{64}$/.test(revision)) {
+      throw new Error(rejected)
+    }
+    busy = "local"
+    localOperation = operation
+    sourceOpen = false
+    error = ""
+    showCurrentOutput()
+    setOutput("")
+    clearCertificateCheck()
+    const monitor = new AbortController()
+    updateMonitor = monitor
+    try {
+      const command = shellQuote(bin) + " keybox-files " + shellQuote(moddir) + " " + operation +
+        " " + shellQuote(id) + " " + shellQuote(revision)
+      const result = await execUpdate(command, text => {
+        if (!disposed) setOutput(stripAnsi(text))
+      }, UPDATE_TIMEOUT, monitor.signal, () => {})
+      if (disposed || result.failure) throw new KeyboxFilesError("detached")
+      requireSuccess(result, rejected)
+      toast(operation === "restore" ? local.successRestore : local.successInstall)
+      // A failed status reread must not turn an already committed install into
+      // a failed operation or invite a retry of its consumed input.
+      try { await reload() } catch (cause) {
+        if (!disposed) error = cause instanceof Error ? cause.message : m.readFailed
+      }
+    } catch (cause) {
+      if (!disposed) error = [error, cause instanceof KeyboxFilesError ? local.operationUnknown : cause instanceof Error ? cause.message : rejected].filter(Boolean).join("\n")
+      throw cause
+    } finally {
+      if (updateMonitor === monitor) updateMonitor = undefined
+      monitor.abort()
+      flushOutput()
+      localOperation = null
+      busy = null
+    }
+  }
+
   function stopUpdate() {
     if (!updateStop || !updateRunning || cancelling || cancelRequested) return
     const stop = updateStop
@@ -639,7 +686,7 @@
     <Toast message={error} active={!targetsPage} closeLabel={m.targetsClose} onclose={() => error = ""} />
 
     {#if targetsPage}
-      <TargetManager {bin} {lang} disabled={!moddir} bind:this={targetManager} onMenuChange={(open) => targetMenuOpen = open} onTitleVisibility={(visible) => targetTitleVisible = visible} onTitleChange={(title) => targetTitle = title} />
+      <TargetManager {bin} {lang} onNotice={(message) => toast(message)} disabled={!moddir} bind:this={targetManager} onMenuChange={(open) => targetMenuOpen = open} onTitleVisibility={(visible) => targetTitleVisible = visible} onTitleChange={(title) => targetTitle = title} />
     {:else}
     <div class="page-enter grid min-w-0 gap-3" out:pageExit>
     <section class="{ui.panel} relative" aria-busy={!initialDone || busy === "refresh"}>
@@ -697,6 +744,10 @@
           <div class="flex min-h-[170px] flex-col items-center justify-center gap-3 text-[13px] text-[var(--muted)]" in:fade={{ duration: reducedMotion ? 0 : 180 }}><ShieldQuestion size={26} /><p>{m.readFailed}</p></div>
         {/if}
       </div>
+      {#if initialDone}
+        <KeyboxFiles {bin} {moddir} {lang} disabled={busy !== null || !moddir}
+          running={busy === "local" ? localOperation : null} onInstall={installKeyboxFile} />
+      {/if}
     </section>
 
     <a href="#/targets" class="{ui.panel} {ui.panelRow} text-[var(--text)] transition-colors hover:bg-[var(--inset)]"><span class={ui.headingTitle}><ListChecks size={17} />{targetBackendTitle(info?.backend, m.targetsTitle)}</span><ChevronRight size={17} /></a>
@@ -793,7 +844,7 @@
 
     <LogOutput output={savedLogVisible ? savedOutput : output} lines={savedLogVisible ? savedOutputLines : outputLines}
       title={m.output} hint={m.hint} currentLabel={m.currentOutput} savedLabel={m.savedUpdateLog}
-      loadingLabel={m.loading} saved={savedLogVisible} loading={logLoading}
+      loadingLabel={m.loading} bottomLabel={m.backToBottom} saved={savedLogVisible} loading={logLoading}
       disabled={!moddir} onCurrent={showCurrentOutput} onSaved={showLog} />
     </div>
     {/if}
