@@ -66,5 +66,6 @@ matching Duck's keybox installer.
 Regression tests use temporary sysroots and synthetic XML only:
 
 ```sh
-(cd src && go test ./internal/backend ./internal/info && go vet ./internal/backend ./internal/info)
+sh src/test/run.sh test ./internal/backend ./internal/info
+sh src/test/run.sh vet ./internal/backend ./internal/info
 ```

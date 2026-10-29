@@ -143,7 +143,10 @@ WebUI output and archives are ignored by Git.
 
 ## Development checks
 
-    (cd src && go test ./... && go vet ./...)
+Go tests are stored in `src/test/`. The runner uses Go’s build overlay to run them in their original packages; package arguments are relative to `src`. Run the complete suite through the runner because plain `go test ./...` skips the separate test module.
+
+    sh src/test/run.sh test ./...
+    sh src/test/run.sh vet ./...
     sh -n action.sh settings.sh service.sh webui.sh customize.sh uninstall.sh build.sh package.sh
     sh tests/lock-compatibility.sh
     # Wrapper compatibility with the Android shell:
