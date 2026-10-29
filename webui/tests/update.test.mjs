@@ -31,7 +31,8 @@ function harness(t, savedSource = null, savedSkip = "0") {
   runInNewContext(compile(i18n), { exports: locale.exports, navigator: { language: "en" } })
   const source = app.match(/<script lang="ts">([\s\S]*?)<\/script>/)[1]
     .replace('let moddir = $state("")', 'let moddir = $state("/data/adb/modules/keybox-lite")')
-  const targetDisabled = app.match(/<TargetManager\b[^>]*disabled=\{([^}]+)\}/)[1]
+  const targetManager = app.match(/<TargetManager\b[\s\S]*?\/>/)[0]
+  const targetDisabled = targetManager.match(/\bdisabled=\{([^}]+)\}/)[1]
   const hooks = `
     export const handlers = {
       update, stopUpdate, appendOutput, setSource, setSkipRevocation, loadMeta, setSchedule,

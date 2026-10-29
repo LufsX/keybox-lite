@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { readFileSync, mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync } from "node:fs"
+import { readFileSync, mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, openSync, closeSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setImmediate, setTimeout as delay } from "node:timers/promises"
@@ -705,15 +705,25 @@ test("detached updates release a serial shell and preserve real supervisor cance
   // Synchronous jobs model a serial native queue. A foreground update would
   // hold this shell until the two-second test deadline fails.
   const h = harness(t, (child, command) => {
-    const result = spawnSync("sh", [], {
-      input: command.replaceAll("/data/local/tmp", temp),
-      encoding: "utf8", timeout: 2000,
-    })
+    // mksh keeps saved pipe descriptors in the background shell. Capture to
+    // files so spawnSync waits for this job's shell exit without waiting for EOF.
+    const paths = ["stdout", "stderr"].map((stream) => join(root, stream + h.calls.length))
+    const fds = paths.map((path) => openSync(path, "w"))
+    let result
+    try {
+      result = spawnSync("sh", [], {
+        input: command.replaceAll("/data/local/tmp", temp),
+        stdio: ["pipe", ...fds], timeout: 2000,
+      })
+    } finally {
+      for (const fd of fds) closeSync(fd)
+    }
     assert.equal(result.error, undefined, "native shell must return before completion")
-    for (const line of result.stdout.trimEnd().split("\n").filter(Boolean)) {
+    const [stdout, stderr] = paths.map((path) => readFileSync(path, "utf8"))
+    for (const line of stdout.trimEnd().split("\n").filter(Boolean)) {
       child.stdout.emit("data", line.replaceAll(temp, "/data/local/tmp"))
     }
-    if (result.stderr) child.stderr.emit("data", result.stderr.trimEnd())
+    if (stderr) child.stderr.emit("data", stderr.trimEnd())
     child.emit("exit", result.status)
   })
   const command = "'" + binary + "' run-update '" + script + "' '" + state + "'"
