@@ -1,202 +1,95 @@
 # Keybox Lite
 
-A KernelSU / APatch / Magisk module that updates the Tricky Store / TEESimulator
-/ TEESimulator-RS / OhMyKeymint keybox from the module Action button or the built-in WebUI.
+[English](README.en.md)
 
-- **Sources**: MeowDump "Megatron" and dpejoh "spectre", raced across direct and proxy routes.
-  Tricky Addon decoding is opt-in and excluded from automatic updates. Spectre tries
-  each eligible candidate through cleanup, backend validation and certificate checks
-  before accepting it.
-- **Decoding / ASN.1 / revocation check** run in a Go binary (`bin/keyboxlite`, static arm64).
-  Semantics: base64 x10 + hex + ROT13, shuffled base64, X.509 serial extraction, Google
-  attestation status matching against the official Google list, racing direct access and the configured proxy.
-- **Runtime** runs in Go: source selection, downloads, preparation, verification, backed-up
-  installation, settings, scheduling and cleanup. Downloads use curl/wget through `os/exec`.
-- **Install** runs entirely within Keybox Lite. Duck ToolBox is not required and
-  is never invoked, even if installed. Backend rules and paths follow its supported
-  implementations. Every install backs up the old file and atomically replaces it,
-  preserving its owner and mode; a new file uses mode 0644.
-  An incompatible keybox or unavailable revocation check stops that candidate.
-- **Runtime locking** uses the kernel's `flock` syscall directly; an external `flock`
-  command is not required.
-- **TS target management** supports TS / TS-L app selection, generation / hack modes,
-  patch policies and adding newly observed user apps at boot. An optional WebUI entry
-  links into the active backend without replacing an existing native WebUI.
+Keybox Lite 是 KernelSU、APatch 和 Magisk 的模块。它更新 Tricky Store、
+TEESimulator、TEESimulator-RS 和 OhMyKeymint 的 keybox。触发更新的方式有两个：
+模块的 Action 按钮，或内置 WebUI。
 
-## Layout
+## 前置条件
 
-    action.sh      thin Action-button entry to the Go update supervisor
-    settings.sh    thin entry to Go settings (schedule and source)
-    service.sh     thin boot entry to target maintenance and the Go scheduler
-    webui.sh       standalone WebUI launcher for injected Magisk Action entries
-    customize.sh   installer
-    uninstall.sh
-    module.prop
-    bin/keyboxlite Go binary (built, not tracked)
-    src/           Go source (backend, targets, runtime, decoding and certificate checks)
-    webui/         Svelte 5 + Tailwind v4 + TS + lucide-svelte WebUI
-    webroot/       WebUI build output (bundled into the zip)
-    META-INF/      module installer
+- Android 设备，arm64 架构
+- KernelSU、APatch 或 Magisk
+- 系统有 `curl` 或 `wget`
 
-## Standalone backend compatibility
+## 安装
 
-| Backend | Detection | Keybox destination | Additional keybox rules |
+1. 下载最新版本的 zip 包。
+2. 在 KernelSU、APatch 或 Magisk 中刷入 zip 包。
+3. 重启设备。
+
+## 使用
+
+- Action 按钮：点击模块的 Action 按钮，模块开始更新 keybox。KernelSU 和 APatch
+  有这个按钮。
+- WebUI：打开模块的 WebUI。点击「更新 keybox」。
+- 定时更新：在 WebUI 中选择「每天」或「每周」。
+- 停止更新：在 WebUI 中点击「停止更新」。
+
+## 支持的后端
+
+| 后端 | 检测方式 | keybox 路径 | 附加要求 |
 | --- | --- | --- | --- |
-| Tricky Store | `tricky_store`, versionCode >= 246 | `/data/adb/tricky_store/keybox.xml` | At least one certified key |
-| Tricky Store legacy | `tricky_store`, lower/missing versionCode | Same as above | At least one certified key |
-| TEESimulator-RS | `tricky_store` with module name `TEESimulator-RS` or `libcertgen.so` | Same as Tricky Store | At least one certified key |
-| OhMyKeymint | `oh_my_keymint` | `/data/misc/keystore/omk/keybox.xml` | EC key required; each key needs a chain and correct declared certificate count |
-| TEESimulator | `teesim` | `/data/adb/teesim/` + `profiles.default.keybox` from `config.json` (default `keybox.xml`) | EC and RSA keys required; every key needs at least two certificates |
+| Tricky Store | 模块 id 为 `tricky_store` | `/data/adb/tricky_store/keybox.xml` | 至少 1 个通过认证的 key |
+| Tricky Store 旧版 | 模块 id 为 `tricky_store`，versionCode 较小或缺失 | 同 Tricky Store | 同 Tricky Store |
+| TEESimulator-RS | 模块 id 为 `tricky_store`，模块名为 `TEESimulator-RS` 或有 `libcertgen.so` | 同 Tricky Store | 同 Tricky Store |
+| OhMyKeymint | 模块 id 为 `oh_my_keymint` | `/data/misc/keystore/omk/keybox.xml` | 必须有 EC key |
+| TEESimulator | 模块 id 为 `teesim` | `config.json` 的 `profiles.default.keybox`，默认是 `/data/adb/teesim/keybox.xml` | 必须有 EC key 和 RSA key |
 
-TEESimulator-RS keeps Tricky Store's module ID and target.txt layout while raising its
-versionCode past Tricky Store's config.ini boundary, so the module name and its native
-certificate generator take precedence over versionCode.
+模块按顺序检测已安装的模块：Tricky Store、OhMyKeymint、TEESimulator。
+模块不向已停用和待删除的模块安装。
+检测到多个后端时，模块只更新选中的那一个。
+TEESimulator 只更新 `profiles.default`，不重写各应用的自定义配置。
 
-Detection uses installed modules with `module.prop`, preferring active Tricky Store,
-then OhMyKeymint, then TEESimulator. Disabled/removal-pending modules are shown for
-diagnostics but never installed into. Staged-only modules are not active. An unsafe
-or malformed configuration is an error, not a reason to guess a different target.
-Only TEESimulator’s default profile is updated; per-app custom profiles are not rewritten.
+## 校验与安装
 
-Target management edits each backend’s own app list: Tricky Store’s `config.ini` /
-`target.txt`, TEESimulator-RS `target.txt`, TEESimulator `config.json`
-(`profiles.default.apps`) and OhMyKeymint `injector.toml` (`scoop`). Modes and
-patch policies exist only in the Tricky Store formats, so they are hidden for the other
-backends. A TEESimulator-RS `target.txt` that declares keybox scopes, or a package-scoped
-`security_patch.txt`, is reported as unreadable instead of being rewritten without those
-scopes. TEESimulator and OhMyKeymint need their daemon configuration to exist; a missing
-file is an error, not a reason to write a partial one.
+安装前，模块校验候选 keybox 的 4 项内容：结构、密码学、有效期和吊销状态。
 
-Before installation the XML is cleaned of comments/BOM/zero-width markers, structurally
-validated, and checked against the selected backend. Keybox Lite checks PEM/DER shape
-and key/leaf-certificate algorithm compatibility. Verification checks private-key
-arithmetic, key/certificate correspondence, certificate signatures and X.509 constraints.
-Root recognition is reported separately; unknown and AOSP roots produce a warning.
-The backend and target are rechecked before replacement. No daemon is restarted
-automatically, matching Duck’s keybox installation behavior.
+- 结构：XML 结构，以及 key 与证书的算法。
+- 密码学：私钥运算，key 与证书的对应，证书签名，X.509 约束。
+- 有效期：全部证书都在有效期内。模块按设备时间判断。
+- 吊销状态：模块向 Google 官方状态列表查询。
 
-Diagnostic commands:
+候选还必须满足所选后端的附加要求（见上一节）。
+4 项校验全部通过后，模块才安装该候选。
+吊销状态无法查询时，模块跳过该候选。
+如果启用了「跳过吊销检查」，模块不查吊销状态，其余校验照常执行。
 
-    bin/keyboxlite backend                     # selected and installed backends as JSON
-    bin/keyboxlite backend id                  # active backend ID
-    bin/keyboxlite backend target              # safe active destination
-    bin/keyboxlite prepare tricky-store < candidate.xml > prepared.xml
-    bin/keyboxlite targets status              # TS targets, packages and entry state
-    bin/keyboxlite targets save < targets.json # save against the status revision
-    bin/keyboxlite targets entry set on        # attach the optional WebUI entry
-    bin/keyboxlite targets entry set off       # remove only this module's links
+安装前，模块备份旧文件。替换是一次原子写入。
+模块保留已安装文件的属主和权限。新文件用 0644。
 
-`backend`, `info` and `targets` accept `--root <directory>` for isolated host fixtures.
-The production update, schedule and uninstall commands do not accept a host sysroot.
-
-## Stopping an update
-
-Action-button, WebUI and scheduled updates run in a dedicated process group.
-The WebUI “Stop update” button terminates that group, including download and verification
-children; it can also stop a managed update started outside the WebUI. PID start-time
-checks protect against stale records. It does not stop standalone certificate checks.
-An update prints a heartbeat every 10 seconds and has a 20-minute overall deadline.
-Curl uses an 8-second connection timeout, a 60-second total timeout and a 15-second
-low-throughput timeout before fallback. Cancellation cannot undo an installation that
-already completed. Updates started by older versions have no managed job record.
-
-## Sources
-
-| Source | Payload / metadata | Decoder |
-| --- | --- | --- |
-| Meow | `https://github.com/MeowDump/Integrity-Box/releases/download/archive/Megatron` | base64 ×10 → hex → ROT13 |
-| Spectre | `https://rawbin.dpejoh.com/catalog`, payloads under `https://rawbin.dpejoh.com/key/` | shuffled base64 |
-| Tricky Addon (disabled by default) | `https://raw.githubusercontent.com/KOWX712/Tricky-Addon-Update-Target-List/keybox/.extra` | hex → base64 |
-
-Source downloads race direct access and configured proxies with at most six active
-routes. A confirmed revocation rejects every route of that source. For each URL,
-failed curl attempts fall back to BusyBox wget and then standalone wget; logs show
-which downloader ran and its error. Partial or empty failed responses are rejected.
-
-Spectre prefers clean entries, then softbanned entries, excluding revoked entries and
-ignoring unverified `working`/`autoOverride` hints. Download, decode or validation
-failure advances to the next candidate. Catalog flags never replace certificate checks.
-The downloader/decoder/parser limit source files to 1 MiB, including streamed wget
-output; all candidates require current time validity and a usable revocation list.
-
-The Addon URL and format match Duck’s default provider. Addon is excluded from the
-default sources; manual use requires `KBL_SOURCES="meow spectre addon" sh action.sh`.
-The saved source selection (`auto`, `meow` or `spectre`, stored in
-`/data/adb/keybox-lite/config`) applies to Action, WebUI and scheduled updates and
-defaults to `auto`; `KBL_SOURCES` overrides it for a single run.
-The optional “Skip revocation check” setting defaults to off and applies to updates;
-when enabled, certificate dates, private keys and chains are still validated, and
-revocation is logged as skipped. The manual Check button retains revocation checking.
-`KB_ACCEL` overrides the default `https://c.etc.moe/` proxy prefix; an empty value
-selects direct and built-in GitHub routes.
-Empty responses are rejected. Integration tests use generated data and mock downloads.
-Duck’s manual repository browser requires interactive selection/download tokens and CAPTCHA.
-
-Target management follows [Duck ToolBox](https://github.com/eltavine/Duck-ToolBox),
-whose Tricky Store manager originates from KOWX712's [Tricky Addon: Update Target List](https://github.com/KOWX712/Tricky-Addon-Update-Target-List)
-(Apache-2.0).
-
-Build dependencies are Go, Node.js/npm and zip. UPX compression is optional;
-without UPX, the module contains the uncompressed static binary. Archives contain
-module runtime files. The source icon is `webui/public/icon.png`; generated binaries,
-WebUI output and archives are ignored by Git.
-
-## Development checks
-
-`make check` runs Go tests and vet, Shell syntax and regression checks, WebUI type and unit checks, browser regressions and a WebUI build. Install the browser once with `(cd webui && npm run test:browser:install)` after installing the WebUI dependencies; browser regressions start and stop their own local test server.
-
-Go tests are stored in `src/test/`. The runner uses Go’s build overlay to run them in their original packages; package arguments are relative to `src`. Run the complete suite through the runner because plain `go test ./...` skips the separate test module.
-
-    sh src/test/run.sh test ./...
-    sh src/test/run.sh vet ./...
-    sh -c 'for script in *.sh src/test/run.sh tests/*.sh; do sh -n "$script" || exit; done'
-    sh tests/lock-compatibility.sh
-    # Wrapper compatibility with the Android shell:
-    # mksh tests/lock-compatibility.sh
-    sh tests/runtime-regression.sh
-    sh tests/sources-regression.sh
-    sh tests/source-race-regression.sh
-    sh tests/standalone-integration.sh
-    (cd webui && npm run check:all)
-
-See [AGENTS.md](AGENTS.md) for architecture, compatibility and validation guidelines.
+替换前，模块再次确认后端和 keybox 路径。
+一个候选失败时，模块继续尝试下一个候选。
+安装完成后，模块不重启后端的守护进程。
 
 ## WebUI
 
-Shows the installed keybox (path, size, serials, XML structural validity), each certificate’s
-valid-from / expiry dates and time-validity status, one-tap update and certificate checking,
-an auto-update schedule (off / daily / weekly), a keybox source selector
-(automatic / Meow / Spectre) and the module's update records. The TS / TS-L targets panel provides app search, user/system filters, manual
-package or UID entries, auto / generate / hack modes, global patch policies and
-per-app policies on modern TS. Saves preserve unknown backend configuration and
-reject stale revisions. Automatic target additions run at boot and apply only to
-newly observed user apps after the initial baseline.
+- 显示已安装的 keybox 路径、大小和证书列表。
+- 显示每张证书的生效时间、到期时间和时间有效性。
+- 提供「更新 keybox」、「证书检测」和「停止更新」。
+- 定时更新支持「关闭」、「每天」和「每周」。
+- 供应源支持「自动」、「Meow」和「Spectre」。
+- 「目标管理」编辑应用列表、跟踪模式和补丁策略。
+- 支持导入本地 keybox 文件，以及恢复已备份的 keybox。
+- 支持导出和导入应用配置，格式是 JSON。
+- 可选 WebUI 入口：在后端模块中添加本模块的入口。
 
-Local XML import and backup recovery preview certificates before installation and always repeat strict validation, including revocation checks, regardless of the automatic-update skip setting.
-App configurations can be exported as JSON and imported with a compatibility/difference preview; confirming an import loads a draft that still requires Save.
+## 构建
 
-The optional WebUI entry creates a link in the active backend's module directory.
-Existing native WebUIs, actions and foreign links are retained. On Magisk, an absent
-Action entry links to `webui.sh`, which opens an installed KSUWebUIStandalone or
-WebUI X host. Turning the feature off or uninstalling removes only this module's
-links. Boot maintenance restores links removed by backend module updates. It retries
-for up to ten minutes after checking Android startup or package-manager readiness;
-maintenance failures do not stop the keybox scheduler.
+`sh package.sh` 构建 Go 二进制和 WebUI，并生成 zip 包。
+构建需要 Go、Node.js、npm 和 zip。
+UPX 压缩可选。
+输出文件是 `dist/keybox-lite-<version>-<versionCode>.zip`。
 
-The WebUI calls the shell through the official `kernelsu` bridge using `spawn` (not `exec`)
-so a long command never freezes the WebView. Supports light/dark and English/Chinese.
+## 许可
 
-Certificate time validity is checked locally against the device clock, including every
-certificate in the keybox. Expired or not-yet-valid certificates stop installation;
-malformed or missing validity information is reported as unknown and also stops installation.
-Local cryptographic integrity and online revocation are separate results. Root recognition
-does not change the existing installation policy.
-`info` includes `validity.status` and per-certificate `serial`, `not_before`, `not_after`
-(Unix seconds), and `status`. `check` / `verify` return 0 on success, 1 for revocation,
-2 when checking fails, and 3 for certificates outside their validity period.
-Certificate serials exposed by the CLI/JSON remain decimal; revocation matching converts
-them to Google’s hexadecimal status-list keys. Official direct and proxy requests race;
-the first valid response wins. Only official results are cached for up to 10 minutes.
-With revocation checking enabled, an unavailable official response returns unknown
-(exit 2). `verify --skip-revocation <keybox>` validates locally and reports
-`RESULT: skipped (revocation)` on success; it does not report the keybox as not revoked.
+Copyright (C) 2026 LufsX。
+
+本项目使用 GNU General Public License 第 3 版或更新版本（GPL-3.0-or-later）。
+许可证全文见 [LICENSE](LICENSE)。
+WebUI 中包含的第三方组件见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## 署名
+
+- 目标管理的配置格式和自动跟踪行为参照 [Duck ToolBox](https://github.com/eltavine/Duck-ToolBox)（MIT）。
+- Tricky Store 目标管理来自 KOWX712 的 [Tricky Addon: Update Target List](https://github.com/KOWX712/Tricky-Addon-Update-Target-List)（Apache-2.0）。
